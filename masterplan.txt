@@ -1,0 +1,742 @@
+Build Plan you can use as a working blueprint.
+
+Target architecture
+┌──────────────────────┐
+│   Next.js App        │
+│ chat / upload / auth │
+└─────────┬────────────┘
+│
+▼
+┌──────────────────────┐
+│   App API Layer      │
+│ retrieval + routing  │
+└──────┬───────┬───────┘
+│       │
+query raw │       │ query synthesized
+│       │
+▼       ▼
+┌────────────────┐  ┌────────────────────┐
+│		  RAG Store     │  │  		LLM Wiki Store    │
+│ 	 vector DB      │  │ 	   markdown / graph   │
+│ 	 chunks+meta    │  │       pages + links  	  │
+└──────┬─────────┘  └─────────┬──────────┘
+│                      │
+└──────────┬───────────┘
+▼
+┌──────────────────────┐
+│   LLM Runtime        │
+│ Gemma via Ollama     │
+└──────────────────────┘
+
+                            ▲
+                            │
+                 ┌──────────────────────┐
+                 │ Ingestion Pipeline   │
+                 │ parse -> normalize   │
+                 │ chunk -> embed       │
+                 │ extract -> summarize │
+                 └──────────┬───────────┘
+                            │
+                            ▼
+                 ┌──────────────────────┐
+                 │ Raw Files            │
+                 │ docs/ppt/xlsx/img    │
+                 └──────────────────────┘
+Build order
+Phase 1 — Get a usable local chat stack running ✅ COMPLETE
+Goal: prove the model, app shell, and local API all work before touching ingestion.
+Step 1. Set up the local runtime ✅
+Used:
+
+Ollama (installed on Windows)
+Gemma 4 (pulled via ollama pull gemma4)
+Open WebUI was not used
+
+Deliverable:
+Model responds to API calls at http://localhost:11434/api/chat. Verified via PowerShell using Invoke-WebRequest.
+Notes:
+
+PowerShell aliases curl to Invoke-WebRequest, so standard curl syntax doesn't work. Use Invoke-WebRequest with -Method POST, -ContentType, and -Body parameters instead.
+PowerShell may show a "Security Warning: Script Execution Risk" prompt when parsing web responses. Answering Y or adding -UseBasicParsing to the command avoids this in the future.
+Gemma 4 was used instead of the originally planned Gemma 3. Update downstream references accordingly.
+
+Phase 2 — Create the app shell ✅ COMPLETE
+
+Goal: make the interface you will actually use from desktop and phone.
+
+Step 2. Build the Next.js app ✅
+
+Used:
+
+Next.js 16.2.3 (React 19, App Router, TypeScript)
+No auth — local-only for now, can add later
+Tailwind 4
+
+Core pages built:
+
+/chat          — conversation index ("select or start a chat")
+/chat/[id]     — individual conversation with streaming chat UI
+/upload        — placeholder for Phase 3 ingestion
+/library       — placeholder for parsed file browser
+/wiki          — placeholder for wiki page viewer
+/settings      — shows current runtime config (Ollama URL, model, storage paths)
+
+Layout:
+
+AppShell wraps all pages with a persistent sidebar and mobile hamburger menu
+Sidebar shows primary nav + live conversation list with delete
+/ redirects to /chat
+
+Deliverable:
+
+Mobile-friendly app shell with sidebar nav and working chat UI.
+
+Notes:
+
+No Prisma used — raw better-sqlite3 is simpler and sufficient.
+Auth was deferred — this is a local-only tool for now. Add if/when exposing externally.
+The /upload, /library, /wiki pages are intentional placeholders — they show clear
+  "coming in Phase N" messaging so the nav is fully wired before the features exist.
+
+Step 3. Add chat persistence ✅
+
+Used:
+
+SQLite via better-sqlite3
+Database at storage/eidetic.db
+No ORM — raw prepared statements
+
+Stored:
+
+conversations (id, title, mode, created_at, updated_at)
+messages (id, conversation_id, role, content, sources_json, created_at)
+
+API routes:
+
+GET  /api/conversations            — list all, ordered by updated_at desc
+POST /api/conversations            — create new conversation
+GET  /api/conversations/[id]       — fetch conversation with full message history
+PATCH /api/conversations/[id]      — update title
+DELETE /api/conversations/[id]     — delete conversation and cascade messages
+POST /api/conversations/[id]/messages — send user message, stream Ollama response,
+                                         persist both turns; auto-titles from first message
+
+Streaming:
+
+Ollama /api/chat called server-side with stream: true
+Response piped token-by-token to the client as plain text
+Full assistant response persisted to DB once stream closes
+
+Deliverable:
+
+Chats persist across sessions. Conversation list is live in sidebar.
+Streaming responses feel instant. Build passes clean (npm run build verified).
+
+Notes:
+
+Model name in Ollama is gemma3 (not gemma4 — that was the product name, not the pull ID).
+Override with env vars: OLLAMA_URL, OLLAMA_MODEL.
+sources_json column is reserved for Phase 5 RAG — not populated yet.
+Auto-title takes the first 60 chars of the first user message; can be improved later.
+Phase 3 — Build the raw file ingestion layer
+
+Goal: turn raw files into normalized text + metadata.
+
+Step 4. Create a file intake workflow
+
+Use:
+
+Next.js uploads or a watched folder on disk
+local file storage, or S3-compatible storage later if needed
+
+Supported file types for v1:
+
+docs / pdf
+ppt / pptx
+xlsx
+receipt images (png, jpg, jpeg)
+
+Raw folders:
+
+/storage/raw
+/storage/processed
+/storage/failed
+
+Deliverable:
+
+Files land in a known place and are tracked in your database.
+Step 5. Parse documents and slides
+
+Use:
+
+Unstructured for docs, PDFs, PowerPoints
+optionally PyMuPDF later for PDF-specific tuning
+
+Extract:
+
+titles
+headings
+paragraphs
+page numbers
+slide numbers
+slide titles
+speaker notes if available
+
+Deliverable:
+
+Docs and slides become text fragments with metadata.
+Step 6. Parse spreadsheets properly
+
+Use:
+
+openpyxl for .xlsx
+optionally pandas for cleanup and export transforms
+
+Extract:
+
+workbook name
+sheet name
+row number
+column headers
+row values
+
+Important:
+
+do not flatten the whole sheet into one blob
+treat rows or tables as individual records
+
+Deliverable:
+
+Spreadsheet data becomes searchable structured records.
+Step 7. Parse receipts
+
+Use:
+
+Tesseract OCR with pytesseract
+Pillow or OpenCV for image cleanup
+optionally a second LLM pass for field extraction
+
+Extract:
+
+raw OCR text
+vendor
+date
+subtotal
+tax
+total
+currency
+category if you can infer it later
+
+Deliverable:
+
+Receipt images become raw text plus structured metadata.
+Phase 4 — Normalize everything into one canonical format
+
+Goal: make every parser output the same basic record shape.
+
+Step 8. Define the normalized fragment schema
+
+Use:
+
+your app database
+JSON metadata fields where helpful
+
+Recommended record shape:
+
+Document
+DocumentFragment
+
+Each fragment should include:
+
+documentId
+sourcePath
+fileType
+text
+fragmentType
+pageNumber
+slideNumber
+sheetName
+rowNumber
+vendor
+receiptDate
+total
+metadataJson
+
+Deliverable:
+
+every file type becomes a predictable set of fragments
+
+This is the most important backend decision. Everything downstream gets easier if this is clean.
+
+Phase 5 — Build the RAG layer
+
+Goal: create the ground-truth retrieval system.
+
+Step 9. Chunk the parsed fragments
+
+Use:
+
+your own chunker or a simple library-based chunker
+
+Rules:
+
+docs: chunk by heading/section first, then size
+slides: usually one chunk per slide or bullet group
+spreadsheets: usually row-based or table-based, not freeform chunking
+receipts: raw OCR text plus extracted field summary
+
+Deliverable:
+
+chunks are small, meaningful, and traceable to source fragments.
+Step 10. Generate embeddings
+
+Use:
+
+Ollama embeddings if you want one local API surface
+or a local embedding model via sentence-transformers
+
+Deliverable:
+
+every chunk has an embedding vector ready for retrieval.
+Step 11. Store vectors and metadata
+
+Use:
+
+Chroma as the vector DB
+
+Store:
+
+chunk text
+embedding
+metadata
+source references
+
+Metadata should always include:
+
+source path
+file type
+document id
+fragment id
+page/slide/sheet/row reference
+timestamps
+extracted business fields like vendor or total
+
+Deliverable:
+
+working semantic retrieval over all parsed data.
+Step 12. Build a simple retrieval test harness
+
+Use:
+
+a Python script or API route
+
+Test questions like:
+
+“show me the Staples receipt”
+“what does slide 5 say about onboarding”
+“find spreadsheet rows related to travel”
+
+Deliverable:
+
+you can verify retrieval quality before involving the wiki layer.
+Phase 6 — Build the LLM Wiki layer
+
+Goal: create synthesized memory from the parsed/RAG data.
+
+Step 13. Set up the wiki store
+
+Use:
+
+plain Markdown files
+optionally Obsidian as the wiki editor/viewer
+optionally qmd later for fast wiki search
+optionally a simple graph/reference table in your app DB
+
+Store wiki pages in:
+
+/storage/wiki
+
+Page types:
+
+entity pages
+topic pages
+summary pages
+timeline pages
+vendor pages
+project pages
+
+Deliverable:
+
+a durable markdown knowledge layer you can inspect manually.
+Step 14. Build the wiki generator
+
+Use:
+
+Gemma via Ollama
+your parsed fragments and source references
+a background worker
+
+Input should come from:
+
+normalized fragments
+chunk metadata
+extracted entities
+spreadsheet rows
+receipt fields
+
+Not directly from binary files.
+
+Wiki page responsibilities:
+
+summarize recurring facts
+connect related concepts
+link to supporting sources
+preserve uncertainty when evidence is weak
+
+Deliverable:
+
+the wiki is generated from grounded data, not chat history.
+Step 15. Add source references to wiki pages
+
+Every wiki page should point back to raw evidence.
+
+Example:
+
+## Evidence
+- doc: employee-handbook.pdf page 12
+- receipt: staples-2026-03-04.jpg
+- spreadsheet: expenses.xlsx / Q1 / row 48
+
+Deliverable:
+
+the wiki stays auditable.
+Step 16. Open and inspect the wiki in Obsidian
+
+Use:
+
+Obsidian
+
+Why:
+
+easy page browsing
+backlinks
+graph view
+manual inspection while building
+
+Deliverable:
+
+you can see whether the synthesized memory is actually useful.
+
+Obsidian is optional for the final product, but very useful during development.
+
+Phase 7 — Build the hybrid query router
+
+Goal: decide when to use raw RAG, wiki, or both.
+
+Step 17. Create a retrieval orchestration API
+
+Use:
+
+Next.js route handlers or a small backend service
+
+Responsibilities:
+
+classify the question
+choose rag, wiki, or hybrid
+gather supporting context
+build the final prompt
+call Ollama
+stream the result back
+
+Suggested query modes:
+
+lookup
+summary
+comparison
+trend
+citation_required
+
+Routing:
+
+lookup → RAG
+summary → wiki first
+comparison/trend → hybrid
+citation_required → RAG mandatory
+
+Deliverable:
+
+one chat endpoint that intelligently decides how to answer.
+Step 18. Build hybrid context assembly
+
+For hybrid mode:
+
+pull top wiki pages
+pull supporting raw chunks
+send both to the LLM
+instruct the model to trust raw evidence over synthesized pages
+
+System rules:
+
+raw source is authoritative
+wiki is a convenience layer
+cite raw evidence when possible
+do not invent support
+
+Deliverable:
+
+better summaries without losing grounding.
+Phase 8 — Make the wiki update automatically from RAG changes
+
+Goal: keep the synthesized memory fresh without full rebuilds.
+
+Step 19. Add file hashing and change detection
+
+Use:
+
+checksums or modified timestamps
+a job queue table in your app DB
+
+Track:
+
+new files
+updated files
+deleted files
+
+Deliverable:
+
+only changed files get reprocessed.
+Step 20. Mark affected wiki pages as dirty
+
+Examples:
+
+new Staples receipt → vendor page “Staples” dirty
+new onboarding deck → onboarding topic page dirty
+updated spreadsheet with expenses → monthly expense summary dirty
+
+Deliverable:
+
+wiki rebuilds become incremental instead of global.
+Step 21. Rebuild only affected wiki pages
+
+Use:
+
+background jobs
+your wiki generator worker
+
+Deliverable:
+
+fast, maintainable synthesized memory.
+Phase 9 — Make it usable from phone and other devices
+
+Goal: reach the app like you would a chat app.
+
+Step 22. Start with LAN access
+
+Simplest first:
+
+run Next.js on your desktop/server
+access it from your phone browser on the same network
+
+Deliverable:
+
+first remote usage without extra infrastructure.
+Step 23. Add secure remote access
+
+Use one of:
+
+Tailscale for easy private access
+or your normal public web hosting approach if you want to expose the app
+
+If private/personal:
+
+Tailscale is the easiest option
+
+If public/productized:
+
+host the Next.js app normally and keep model/vector services private behind it
+
+Deliverable:
+
+you can use the assistant from your phone anywhere.
+Phase 10 — Add trust, debugging, and polish
+
+Goal: make the system reliable enough to keep using.
+
+Step 24. Show sources in the UI
+
+Under each answer, show:
+
+source chunks
+file name
+page/slide/sheet/row references
+wiki pages used
+answer mode (rag, wiki, hybrid)
+
+Deliverable:
+
+you can tell why the system said what it said.
+Step 25. Add a file inspection page
+
+Show:
+
+raw file
+parsed fragments
+chunked output
+metadata
+embeddings status
+linked wiki pages
+
+Deliverable:
+
+you can debug ingestion problems quickly.
+Step 26. Add a wiki review page
+
+Show:
+
+generated markdown
+linked evidence
+last updated time
+confidence / quality notes
+
+Deliverable:
+
+you can inspect and improve synthesized pages.
+Step 27. Add manual controls
+
+Useful admin actions:
+
+reparse file
+re-embed file
+rebuild wiki page
+rebuild all dirty pages
+mark file as ignored
+
+Deliverable:
+
+easier iteration during development.
+Recommended tools by layer
+App layer
+Next.js
+auth library of your choice
+Tailwind
+Prisma optional
+Postgres or SQLite
+LLM runtime
+Ollama
+Gemma
+Parsing
+Unstructured
+openpyxl
+pandas optional
+Tesseract OCR
+pytesseract
+Pillow
+OpenCV optional
+RAG layer
+Chroma
+embedding model via Ollama or sentence-transformers
+Wiki layer
+Markdown
+Obsidian
+qmd optional later for wiki search
+Worker / job processing
+simple Python worker first
+database-backed job table
+optionally Redis + a queue later if needed
+Remote access
+LAN first
+Tailscale if you want easy private remote access
+Suggested milestone plan
+Milestone 1
+
+Local chat works.
+
+Ollama
+Gemma
+Next.js basic chat page
+Milestone 2
+
+RAG works with citations.
+
+uploads
+parsing
+chunking
+embeddings
+Chroma
+answer with source snippets
+Milestone 3
+
+All target file types work.
+
+docs
+PowerPoints
+Excel
+receipts
+Milestone 4
+
+Wiki generation works.
+
+markdown pages
+Obsidian inspection
+evidence links
+per-topic or per-entity summaries
+Milestone 5
+
+Hybrid routing works.
+
+raw lookup
+synthesized answers
+mixed answers with evidence
+Milestone 6
+
+Remote access feels good on phone.
+
+mobile UI
+private or hosted access
+persistent chats
+Best development sequence
+
+If you want the least pain, build in this order:
+
+Ollama + local chat
+Next.js chat UI
+upload flow
+docs/PDF ingestion
+Chroma retrieval
+citations in answers
+PowerPoint ingestion
+Excel ingestion
+receipt OCR
+markdown wiki generation
+Obsidian inspection
+hybrid routing
+incremental wiki rebuilds
+phone access
+polish
+Practical rule set for the whole project
+Raw files are never the answer layer.
+Parsed fragments are the canonical machine-readable layer.
+RAG is the ground truth.
+LLM Wiki is synthesized memory.
+If wiki and source conflict, source wins.
+Every synthesized page should link back to evidence.
+Every answer should show where it came from.
+One-page summary
+What you are building
+
+A local AI knowledge system where:
+
+files are parsed into structured fragments
+fragments are indexed in a RAG database
+the RAG data generates a persistent markdown wiki
+a Next.js app routes user questions to raw retrieval, synthesized memory, or both
+the whole system can be accessed from desktop or phone
+Best tool choices
+Next.js for the app
+Ollama for local model runtime
+Chroma for vector storage
+Unstructured for docs and PowerPoints
+openpyxl for Excel
+Tesseract/pytesseract for receipt OCR
+Markdown + Obsidian for the wiki layer
+Tailscale only if you want easy private remote access

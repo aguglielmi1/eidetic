@@ -39,3 +39,14 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# IDE
+.idea/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# SQLite database (runtime data, not source)
+/storage/*.db
+/storage/*.db-shm
+/storage/*.db-wal
