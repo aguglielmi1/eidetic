@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import db from "@/lib/db";
+import { routeQuery } from "@/lib/queryRouter";
 
 const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://localhost:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "gemma3";
@@ -31,6 +32,9 @@ export async function POST(
      VALUES (?, ?, 'user', ?, ?)`
   ).run(userMsgId, conversationId, userContent, now);
 
+  // Classify query and retrieve context (RAG / wiki / hybrid)
+  const routeResult = routeQuery(userContent);
+
   // Build message history for Ollama
   const history = db
     .prepare(
@@ -39,6 +43,11 @@ export async function POST(
        ORDER BY created_at ASC`
     )
     .all(conversationId) as { role: string; content: string }[];
+
+  // Prepend a system message when we have retrieved context
+  const ollamaMessages = routeResult.hasContext
+    ? [{ role: "system", content: routeResult.systemPrompt }, ...history]
+    : history;
 
   // Update conversation's updated_at
   db.prepare(`UPDATE conversations SET updated_at = ? WHERE id = ?`).run(Date.now(), conversationId);
@@ -58,7 +67,7 @@ export async function POST(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: OLLAMA_MODEL,
-        messages: history,
+        messages: ollamaMessages,
         stream: true,
       }),
     });
@@ -70,7 +79,28 @@ export async function POST(
     return Response.json({ error: "Ollama returned an error" }, { status: 502 });
   }
 
-  // Persist assistant message once stream is done, while streaming to client
+  // Sources to persist alongside the assistant message
+  const sourcesJson = JSON.stringify({
+    mode: routeResult.mode,
+    category: routeResult.category,
+    chunks: routeResult.chunks.map((c) => ({
+      chunk_id: c.chunk_id,
+      score: c.score,
+      original_name: c.original_name,
+      file_type: c.file_type,
+      fragment_type: c.fragment_type,
+      page_number: c.page_number,
+      slide_number: c.slide_number,
+      slide_title: c.slide_title,
+      sheet_name: c.sheet_name,
+      row_number: c.row_number,
+      vendor: c.vendor,
+      receipt_date: c.receipt_date,
+      total: c.total,
+    })),
+    wikiPages: routeResult.wikiPages,
+  });
+
   const assistantMsgId = randomUUID();
   const assistantCreatedAt = Date.now();
   let fullContent = "";
@@ -102,11 +132,10 @@ export async function POST(
         }
       } finally {
         reader.releaseLock();
-        // Persist complete assistant response
         db.prepare(
-          `INSERT INTO messages (id, conversation_id, role, content, created_at)
-           VALUES (?, ?, 'assistant', ?, ?)`
-        ).run(assistantMsgId, conversationId, fullContent, assistantCreatedAt);
+          `INSERT INTO messages (id, conversation_id, role, content, sources_json, created_at)
+           VALUES (?, ?, 'assistant', ?, ?, ?)`
+        ).run(assistantMsgId, conversationId, fullContent, sourcesJson, assistantCreatedAt);
 
         controller.close();
       }
@@ -118,6 +147,7 @@ export async function POST(
       "Content-Type": "text/plain; charset=utf-8",
       "X-Message-Id": assistantMsgId,
       "X-Conversation-Id": conversationId,
+      "X-Route-Mode": routeResult.mode,
     },
   });
 }

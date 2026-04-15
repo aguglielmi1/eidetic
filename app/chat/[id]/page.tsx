@@ -6,6 +6,7 @@ interface Message {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
+  sources_json: string | null;
   created_at: number;
 }
 
