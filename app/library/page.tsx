@@ -9,6 +9,9 @@ interface Document {
   file_type: string;
   status: "queued" | "processing" | "processed" | "failed";
   embed_status: "embedding" | "embedded" | "embed_failed" | null;
+  wiki_status: "generating" | "generated" | "wiki_failed" | null;
+  wiki_error: string | null;
+  wiki_page_slug: string | null;
   file_size: number;
   fragment_count: number;
   chunk_count: number;
@@ -29,6 +32,12 @@ const EMBED_BADGE: Record<NonNullable<Document["embed_status"]>, { label: string
   embedding:   { label: "Embedding…", classes: "bg-blue-900/60 text-blue-300 animate-pulse" },
   embedded:    { label: "Embedded",   classes: "bg-indigo-900/60 text-indigo-300" },
   embed_failed:{ label: "Embed failed", classes: "bg-red-900/60 text-red-400" },
+};
+
+const WIKI_BADGE: Record<NonNullable<Document["wiki_status"]>, { label: string; classes: string }> = {
+  generating:  { label: "Wiki…",      classes: "bg-amber-900/60 text-amber-300 animate-pulse" },
+  generated:   { label: "Wiki",       classes: "bg-teal-900/60 text-teal-300" },
+  wiki_failed: { label: "Wiki failed", classes: "bg-red-900/60 text-red-400" },
 };
 
 const TYPE_ICON: Record<string, string> = {
@@ -60,6 +69,7 @@ export default function LibraryPage() {
   const [loading, setLoading] = useState(true);
   const [parsing, setParsing] = useState<Set<string>>(new Set());
   const [embedding, setEmbedding] = useState<Set<string>>(new Set());
+  const [wikifying, setWikifying] = useState<Set<string>>(new Set());
 
   const load = useCallback(async () => {
     const res = await fetch("/api/documents");
@@ -72,7 +82,8 @@ export default function LibraryPage() {
     // Poll while any doc is processing or embedding
     const interval = setInterval(() => {
       if (docs.some((d) =>
-        d.status === "processing" || d.status === "queued" || d.embed_status === "embedding"
+        d.status === "processing" || d.status === "queued" ||
+        d.embed_status === "embedding" || d.wiki_status === "generating"
       )) {
         load();
       }
@@ -97,6 +108,16 @@ export default function LibraryPage() {
     setEmbedding((s) => { const n = new Set(s); n.delete(doc.id); return n; });
     setDocs((prev) =>
       prev.map((d) => (d.id === doc.id ? { ...d, embed_status: "embedding" } : d))
+    );
+    load();
+  };
+
+  const generateWiki = async (doc: Document) => {
+    setWikifying((s) => new Set(s).add(doc.id));
+    await fetch(`/api/documents/${doc.id}/wiki`, { method: "POST" });
+    setWikifying((s) => { const n = new Set(s); n.delete(doc.id); return n; });
+    setDocs((prev) =>
+      prev.map((d) => (d.id === doc.id ? { ...d, wiki_status: "generating" } : d))
     );
     load();
   };
@@ -152,8 +173,10 @@ export default function LibraryPage() {
         {docs.map((doc) => {
           const badge = STATUS_BADGE[doc.status] ?? STATUS_BADGE.queued;
           const embedBadge = doc.embed_status ? EMBED_BADGE[doc.embed_status] : null;
+          const wikiBadge = doc.wiki_status ? WIKI_BADGE[doc.wiki_status] : null;
           const isParsing = parsing.has(doc.id) || doc.status === "processing";
           const isEmbedding = embedding.has(doc.id) || doc.embed_status === "embedding";
+          const isWikifying = wikifying.has(doc.id) || doc.wiki_status === "generating";
           return (
             <li
               key={doc.id}
@@ -180,6 +203,11 @@ export default function LibraryPage() {
                       {embedBadge.label}
                     </span>
                   )}
+                  {wikiBadge && (
+                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${wikiBadge.classes}`}>
+                      {wikiBadge.label}
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -201,6 +229,12 @@ export default function LibraryPage() {
               {doc.embed_status === "embed_failed" && doc.embed_error && (
                 <p className="text-xs text-red-400 pl-9 truncate" title={doc.embed_error}>
                   Embed error: {doc.embed_error}
+                </p>
+              )}
+
+              {doc.wiki_status === "wiki_failed" && doc.wiki_error && (
+                <p className="text-xs text-red-400 pl-9 truncate" title={doc.wiki_error}>
+                  Wiki error: {doc.wiki_error}
                 </p>
               )}
 
@@ -236,6 +270,21 @@ export default function LibraryPage() {
                       : doc.embed_status === "embed_failed"
                       ? "Retry embed"
                       : "Embed"}
+                  </button>
+                )}
+                {doc.status === "processed" && (
+                  <button
+                    onClick={() => generateWiki(doc)}
+                    disabled={isWikifying}
+                    className="text-xs px-3 py-1.5 rounded-lg bg-teal-900/40 hover:bg-teal-900/70 text-teal-300 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {isWikifying
+                      ? "Generating…"
+                      : doc.wiki_status === "generated"
+                      ? "Regenerate Wiki"
+                      : doc.wiki_status === "wiki_failed"
+                      ? "Retry Wiki"
+                      : "Generate Wiki"}
                   </button>
                 )}
                 <button
