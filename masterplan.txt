@@ -138,207 +138,213 @@ Model name in Ollama is gemma3 (not gemma4 — that was the product name, not th
 Override with env vars: OLLAMA_URL, OLLAMA_MODEL.
 sources_json column is reserved for Phase 5 RAG — not populated yet.
 Auto-title takes the first 60 chars of the first user message; can be improved later.
-Phase 3 — Build the raw file ingestion layer
+Phase 3 — Build the raw file ingestion layer ✅ COMPLETE
 
 Goal: turn raw files into normalized text + metadata.
 
-Step 4. Create a file intake workflow
+Step 4. Create a file intake workflow ✅
 
-Use:
+Used:
 
-Next.js uploads or a watched folder on disk
-local file storage, or S3-compatible storage later if needed
+Next.js multipart upload route
+Local file storage under storage/raw/{docId}/
 
-Supported file types for v1:
+Supported file types:
 
-docs / pdf
-ppt / pptx
+pdf, docx
+pptx
 xlsx
 receipt images (png, jpg, jpeg)
 
-Raw folders:
+Raw folders created automatically on startup:
 
-/storage/raw
-/storage/processed
-/storage/failed
+storage/raw
+storage/processed
+storage/failed
 
-Deliverable:
+API routes:
 
-Files land in a known place and are tracked in your database.
-Step 5. Parse documents and slides
-
-Use:
-
-Unstructured for docs, PDFs, PowerPoints
-optionally PyMuPDF later for PDF-specific tuning
-
-Extract:
-
-titles
-headings
-paragraphs
-page numbers
-slide numbers
-slide titles
-speaker notes if available
+POST /api/upload              — multipart upload; saves file, creates DB record (status: queued)
+GET  /api/documents           — list all documents
+GET  /api/documents/[id]      — fetch document + fragments
+DELETE /api/documents/[id]    — delete file + DB record
+POST /api/documents/[id]/parse — spawn Python parser detached; marks doc as processing
 
 Deliverable:
 
-Docs and slides become text fragments with metadata.
-Step 6. Parse spreadsheets properly
+Files land in storage/raw and are tracked in the database.
 
-Use:
+Step 5. Parse documents and slides ✅
 
-openpyxl for .xlsx
-optionally pandas for cleanup and export transforms
+Used:
 
-Extract:
+unstructured[pdf,docx] for PDFs and Word documents
+python-pptx for PowerPoint
 
-workbook name
-sheet name
-row number
-column headers
-row values
+Extracted:
 
-Important:
-
-do not flatten the whole sheet into one blob
-treat rows or tables as individual records
+headings, paragraphs, page numbers (PDF/DOCX via unstructured element types)
+slide text, slide titles, slide numbers, speaker notes (PPTX via python-pptx)
 
 Deliverable:
 
-Spreadsheet data becomes searchable structured records.
-Step 7. Parse receipts
+Docs and slides become text fragments with metadata stored in document_fragments.
 
-Use:
+Step 6. Parse spreadsheets properly ✅
 
-Tesseract OCR with pytesseract
-Pillow or OpenCV for image cleanup
-optionally a second LLM pass for field extraction
+Used:
 
-Extract:
+openpyxl (read-only, data-only mode)
 
-raw OCR text
-vendor
-date
-subtotal
-tax
-total
-currency
-category if you can infer it later
+Extracted:
+
+sheet name, row number, column headers (first non-empty row), row values
+Each row → one fragment; not flattened into a blob
+Row values serialized to metadata_json for downstream use
+
+Deliverable:
+
+Spreadsheet rows are individually searchable structured records.
+
+Step 7. Parse receipts ✅
+
+Used:
+
+pytesseract + Pillow (greyscale + sharpen preprocessing)
+Heuristic regex for total, subtotal, tax, date extraction
+Vendor inferred from first line of OCR output
+
+Extracted:
+
+raw OCR text (fragment_type: ocr_text)
+structured fields as a second fragment (fragment_type: receipt_fields): vendor, receipt_date, total, subtotal, tax
 
 Deliverable:
 
 Receipt images become raw text plus structured metadata.
-Phase 4 — Normalize everything into one canonical format
+
+Notes:
+
+Parser is ingestion/parse.py — unified dispatcher by file_type from DB.
+Document statuses: queued → processing → processed | failed.
+Override Python executable with PYTHON_CMD env var.
+Build verified clean.
+
+Phase 4 — Normalize everything into one canonical format ✅ COMPLETE
 
 Goal: make every parser output the same basic record shape.
 
-Step 8. Define the normalized fragment schema
+Step 8. Define the normalized fragment schema ✅
 
-Use:
+Used:
 
-your app database
-JSON metadata fields where helpful
+SQLite via better-sqlite3 (no ORM)
 
-Recommended record shape:
+Schema implemented:
 
-Document
-DocumentFragment
+documents table — id, original_name, file_type, status, file_path, file_size,
+                   fragment_count, error_message, embed_status, embed_error,
+                   chunk_count, created_at, updated_at
 
-Each fragment should include:
-
-documentId
-sourcePath
-fileType
-text
-fragmentType
-pageNumber
-slideNumber
-sheetName
-rowNumber
-vendor
-receiptDate
-total
-metadataJson
+document_fragments table — id, document_id, text, fragment_type,
+                            page_number, slide_number, slide_title,
+                            sheet_name, row_number,
+                            vendor, receipt_date, total,
+                            metadata_json, created_at
 
 Deliverable:
 
-every file type becomes a predictable set of fragments
+Every file type produces a predictable set of document_fragments rows.
+All downstream RAG and wiki work reads from this table.
 
-This is the most important backend decision. Everything downstream gets easier if this is clean.
+Notes:
 
-Phase 5 — Build the RAG layer
+This is the most important backend decision — everything downstream depends on it.
+
+Phase 5 — Build the RAG layer ✅ COMPLETE
 
 Goal: create the ground-truth retrieval system.
 
-Step 9. Chunk the parsed fragments
+Step 9. Chunk the parsed fragments ✅
 
-Use:
-
-your own chunker or a simple library-based chunker
-
-Rules:
-
-docs: chunk by heading/section first, then size
-slides: usually one chunk per slide or bullet group
-spreadsheets: usually row-based or table-based, not freeform chunking
-receipts: raw OCR text plus extracted field summary
+Approach: one chunk per fragment (no sub-chunking in v1).
+Each fragment is already a meaningful unit:
+  docs: one chunk per paragraph/heading/element
+  slides: one chunk per text block or notes block
+  spreadsheets: one chunk per row
+  receipts: one chunk for raw OCR text, one for extracted fields
 
 Deliverable:
 
-chunks are small, meaningful, and traceable to source fragments.
-Step 10. Generate embeddings
+chunks table in SQLite tracks which fragments have been embedded.
+Each chunk is traceable back to its source fragment and document.
 
-Use:
+Step 10. Generate embeddings ✅
 
-Ollama embeddings if you want one local API surface
-or a local embedding model via sentence-transformers
+Used:
 
-Deliverable:
-
-every chunk has an embedding vector ready for retrieval.
-Step 11. Store vectors and metadata
-
-Use:
-
-Chroma as the vector DB
-
-Store:
-
-chunk text
-embedding
-metadata
-source references
-
-Metadata should always include:
-
-source path
-file type
-document id
-fragment id
-page/slide/sheet/row reference
-timestamps
-extracted business fields like vendor or total
+Ollama /api/embeddings endpoint
+Model: nomic-embed-text (override with EMBED_MODEL env var)
+Pre-requisite: ollama pull nomic-embed-text
 
 Deliverable:
 
-working semantic retrieval over all parsed data.
-Step 12. Build a simple retrieval test harness
+Every chunk has an embedding vector stored in Chroma.
 
-Use:
+Step 11. Store vectors and metadata ✅
 
-a Python script or API route
+Used:
 
-Test questions like:
+chromadb PersistentClient at storage/chroma/
+Collection: eidetic_chunks (cosine similarity space)
 
-“show me the Staples receipt”
-“what does slide 5 say about onboarding”
-“find spreadsheet rows related to travel”
+Stored per chunk:
+
+chunk text (documents)
+embedding vector (embeddings)
+metadata: document_id, fragment_id, fragment_type,
+          page/slide/sheet/row, vendor, receipt_date, total
+
+SQLite chunks table mirrors Chroma IDs for integrity.
+
+Implementation:
+
+ingestion/embed.py — args: <doc_id> <db_path> [chroma_path] [ollama_url]
+  Reads fragments → embeds each → upserts to Chroma + SQLite
+  Re-embed deletes stale chunks first
+  Updates documents.embed_status: null → embedding → embedded | embed_failed
+
+POST /api/documents/[id]/embed — spawns embed.py detached
 
 Deliverable:
 
-you can verify retrieval quality before involving the wiki layer.
+Working semantic retrieval over all parsed data.
+
+Step 12. Build a simple retrieval test harness ✅
+
+Used:
+
+ingestion/retrieve.py — Python script called synchronously by the API route
+POST /api/retrieve — body: {query: string, n?: number (default 5, max 20)}
+                     returns: JSON array of chunks with score + full source metadata
+
+Each result includes:
+
+chunk_id, text, score (cosine similarity 0–1)
+document_id, original_name, file_type
+fragment_type, page_number, slide_number, slide_title
+sheet_name, row_number, vendor, receipt_date, total
+
+Library UI:
+
+Embed / Re-embed / Retry embed button (appears after parsing)
+Embed status badges: Embedding… / Embedded / Embed failed
+Shows fragment count + chunk count when embedded
+Polls every 3s while embedding is in progress
+
+Deliverable:
+
+POST /api/retrieve can verify retrieval quality before wiring into chat.
 Phase 6 — Build the LLM Wiki layer
 
 Goal: create synthesized memory from the parsed/RAG data.
