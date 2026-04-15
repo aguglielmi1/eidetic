@@ -1,0 +1,436 @@
+#!/usr/bin/env python3
+"""
+Eidetic wiki generator.
+
+Usage:
+    python wiki.py <doc_id|all> <db_path> [wiki_path] [ollama_url]
+
+Environment variables:
+    OLLAMA_URL    Override Ollama base URL (default: http://localhost:11434)
+    OLLAMA_MODEL  Ollama chat model        (default: gemma3)
+
+Reads parsed document_fragments from SQLite, calls Gemma via Ollama to
+generate markdown wiki pages, writes them to wiki_path, and records them in
+the wiki_pages table.
+
+Page types produced:
+    vendor        — one page per unique vendor (aggregates all receipts)
+    doc           — one page per PDF / DOCX document
+    presentation  — one page per PPTX file
+    data          — one page per XLSX spreadsheet
+"""
+
+import sys
+import os
+import json
+import re
+import sqlite3
+import uuid
+import traceback
+import urllib.request
+from pathlib import Path
+from datetime import datetime
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def get_db(db_path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    return conn
+
+
+def slugify(text: str) -> str:
+    """Convert a string to a URL / filename safe slug."""
+    text = text.lower().strip()
+    text = re.sub(r"[^\w\s-]", "", text)
+    text = re.sub(r"[\s_-]+", "-", text)
+    text = text.strip("-")
+    return text or "unknown"
+
+
+def set_wiki_status(conn: sqlite3.Connection, doc_id: str, status: str,
+                    error: str | None = None, page_slug: str | None = None):
+    conn.execute(
+        """UPDATE documents
+           SET wiki_status = ?, wiki_error = ?, wiki_page_slug = ?, updated_at = ?
+           WHERE id = ?""",
+        (status, error, page_slug, int(datetime.now().timestamp() * 1000), doc_id),
+    )
+    conn.commit()
+
+
+def call_ollama(messages: list[dict], ollama_url: str, model: str) -> str:
+    """Call Ollama /api/chat (non-streaming) and return assistant content."""
+    payload = json.dumps({
+        "model": model,
+        "messages": messages,
+        "stream": False,
+    }).encode()
+    req = urllib.request.Request(
+        f"{ollama_url}/api/chat",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        data = json.loads(resp.read())
+    return data["message"]["content"]
+
+
+def upsert_wiki_page(conn: sqlite3.Connection, slug: str, page_type: str,
+                     title: str, content: str, file_path: str,
+                     source_doc_ids: list[str]):
+    """Insert or replace a wiki_pages row and write the markdown file."""
+    Path(file_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(file_path).write_text(content, encoding="utf-8")
+
+    now = int(datetime.now().timestamp() * 1000)
+    existing = conn.execute(
+        "SELECT id FROM wiki_pages WHERE slug = ?", (slug,)
+    ).fetchone()
+
+    if existing:
+        conn.execute(
+            """UPDATE wiki_pages
+               SET title = ?, content = ?, file_path = ?, source_doc_ids = ?,
+                   dirty = 0, updated_at = ?
+               WHERE slug = ?""",
+            (title, content, file_path, json.dumps(source_doc_ids), now, slug),
+        )
+    else:
+        conn.execute(
+            """INSERT INTO wiki_pages
+               (id, slug, page_type, title, content, file_path, source_doc_ids, dirty, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)""",
+            (str(uuid.uuid4()), slug, page_type, title, content,
+             file_path, json.dumps(source_doc_ids), now, now),
+        )
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Context assembly helpers
+# ---------------------------------------------------------------------------
+
+MAX_CONTEXT_CHARS = 6000  # keep well inside Gemma's context window
+
+
+def truncate_context(parts: list[str], max_chars: int = MAX_CONTEXT_CHARS) -> str:
+    result = []
+    total = 0
+    for part in parts:
+        if total + len(part) > max_chars:
+            remaining = max_chars - total
+            if remaining > 100:
+                result.append(part[:remaining] + "…")
+            break
+        result.append(part)
+        total += len(part)
+    return "\n\n".join(result)
+
+
+# ---------------------------------------------------------------------------
+# Page generators
+# ---------------------------------------------------------------------------
+
+SYSTEM_PROMPT = (
+    "You are a knowledge manager synthesizing document content into a structured wiki page. "
+    "Write clear, factual Markdown. "
+    "Never invent facts that are not present in the source material. "
+    "If evidence is thin or ambiguous, say so explicitly. "
+    "Always end with an ## Evidence section that lists every source file referenced."
+)
+
+
+def generate_vendor_page(vendor: str, docs: list, conn: sqlite3.Connection,
+                         ollama_url: str, model: str) -> str:
+    """Build a vendor wiki page from all receipts for that vendor."""
+    parts = []
+    evidence_lines = []
+
+    for doc in docs:
+        frags = conn.execute(
+            "SELECT * FROM document_fragments WHERE document_id = ? ORDER BY created_at ASC",
+            (doc["id"],),
+        ).fetchall()
+        for f in frags:
+            if f["text"]:
+                parts.append(f"[{doc['original_name']}]\n{f['text']}")
+        evidence_lines.append(f"- receipt: {doc['original_name']}")
+
+    context = truncate_context(parts)
+    evidence_block = "\n".join(evidence_lines)
+
+    user_msg = (
+        f"Generate a wiki page for the vendor **{vendor}**.\n\n"
+        f"Source receipts:\n{context}\n\n"
+        "The page must include these sections:\n"
+        "# {Vendor Name}\n"
+        "## Overview\n"
+        "## Purchases\n"
+        "## Totals\n"
+        f"## Evidence\n{evidence_block}\n\n"
+        "Write the complete wiki page now."
+    )
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user",   "content": user_msg},
+    ]
+    return call_ollama(messages, ollama_url, model)
+
+
+def generate_doc_page(doc, fragments: list, ollama_url: str, model: str) -> str:
+    """Build a summary wiki page for a PDF or DOCX document."""
+    parts = [f["text"] for f in fragments if f["text"]]
+    context = truncate_context(parts)
+    doc_name = doc["original_name"]
+
+    user_msg = (
+        f"Generate a wiki summary page for the document **{doc_name}**.\n\n"
+        f"Content:\n{context}\n\n"
+        "The page must include these sections:\n"
+        "# {Document Title}\n"
+        "## Overview\n"
+        "## Key Points\n"
+        "## Evidence\n"
+        f"- doc: {doc_name}\n\n"
+        "Write the complete wiki page now."
+    )
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user",   "content": user_msg},
+    ]
+    return call_ollama(messages, ollama_url, model)
+
+
+def generate_presentation_page(doc, fragments: list, ollama_url: str, model: str) -> str:
+    """Build a summary wiki page for a PPTX presentation."""
+    parts = []
+    for f in fragments:
+        if not f["text"]:
+            continue
+        label = ""
+        if f["slide_number"] is not None:
+            label = f"[Slide {f['slide_number']}"
+            if f["slide_title"]:
+                label += f": {f['slide_title']}"
+            label += "] "
+        parts.append(f"{label}{f['text']}")
+
+    context = truncate_context(parts)
+    doc_name = doc["original_name"]
+
+    user_msg = (
+        f"Generate a wiki summary page for the presentation **{doc_name}**.\n\n"
+        f"Slide content:\n{context}\n\n"
+        "The page must include these sections:\n"
+        "# {Presentation Title}\n"
+        "## Overview\n"
+        "## Key Topics\n"
+        "## Main Points\n"
+        "## Evidence\n"
+        f"- presentation: {doc_name}\n\n"
+        "Write the complete wiki page now."
+    )
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user",   "content": user_msg},
+    ]
+    return call_ollama(messages, ollama_url, model)
+
+
+def generate_spreadsheet_page(doc, fragments: list, ollama_url: str, model: str) -> str:
+    """Build a structured data summary wiki page for an XLSX spreadsheet."""
+    # Group by sheet
+    sheets: dict[str, list[str]] = {}
+    for f in fragments:
+        if not f["text"]:
+            continue
+        sheet = f["sheet_name"] or "Sheet1"
+        sheets.setdefault(sheet, []).append(f["text"])
+
+    sheet_summaries = []
+    for sheet_name, rows in sheets.items():
+        sample = rows[:20]
+        sheet_summaries.append(f"Sheet: {sheet_name}\n" + "\n".join(sample))
+
+    context = truncate_context(sheet_summaries)
+    doc_name = doc["original_name"]
+    sheet_list = ", ".join(sheets.keys())
+
+    user_msg = (
+        f"Generate a wiki data summary page for the spreadsheet **{doc_name}**.\n"
+        f"Sheets: {sheet_list}\n\n"
+        f"Sample data:\n{context}\n\n"
+        "The page must include these sections:\n"
+        "# {Spreadsheet Title}\n"
+        "## Overview\n"
+        "## Data Structure\n"
+        "## Key Observations\n"
+        "## Evidence\n"
+        f"- spreadsheet: {doc_name}\n\n"
+        "Write the complete wiki page now."
+    )
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user",   "content": user_msg},
+    ]
+    return call_ollama(messages, ollama_url, model)
+
+
+# ---------------------------------------------------------------------------
+# Document processor
+# ---------------------------------------------------------------------------
+
+def process_document(doc_id: str, conn: sqlite3.Connection,
+                     wiki_path: Path, ollama_url: str, model: str):
+    doc = conn.execute(
+        "SELECT * FROM documents WHERE id = ?", (doc_id,)
+    ).fetchone()
+
+    if doc is None:
+        print(f"[wiki] Document {doc_id} not found", file=sys.stderr)
+        return
+
+    if doc["status"] != "processed":
+        print(
+            f"[wiki] Skipping {doc['original_name']} — status: {doc['status']} (must be 'processed')",
+            file=sys.stderr,
+        )
+        return
+
+    print(f"[wiki] Processing {doc['original_name']} ({doc['file_type']})")
+    set_wiki_status(conn, doc_id, "generating")
+
+    try:
+        file_type = doc["file_type"]
+
+        if file_type == "image":
+            # Receipt → aggregate by vendor
+            vendor_raw = conn.execute(
+                """SELECT vendor FROM document_fragments
+                   WHERE document_id = ? AND vendor IS NOT NULL
+                   LIMIT 1""",
+                (doc_id,),
+            ).fetchone()
+            vendor = vendor_raw["vendor"] if vendor_raw else "Unknown Vendor"
+
+            # Gather all documents from same vendor
+            vendor_doc_ids_rows = conn.execute(
+                """SELECT DISTINCT d.id, d.original_name, d.file_type
+                   FROM documents d
+                   JOIN document_fragments f ON f.document_id = d.id
+                   WHERE f.vendor = ? AND d.status = 'processed'""",
+                (vendor,),
+            ).fetchall()
+            vendor_docs = list(vendor_doc_ids_rows)
+
+            slug = f"vendor-{slugify(vendor)}"
+            file_path = str(wiki_path / "vendor" / f"{slugify(vendor)}.md")
+            content = generate_vendor_page(vendor, vendor_docs, conn, ollama_url, model)
+            source_ids = [d["id"] for d in vendor_docs]
+            upsert_wiki_page(conn, slug, "vendor", vendor, content, file_path, source_ids)
+
+            # Update wiki_status for all contributing docs
+            for d in vendor_docs:
+                set_wiki_status(conn, d["id"], "generated", page_slug=slug)
+
+        elif file_type in ("pdf", "docx"):
+            fragments = conn.execute(
+                "SELECT * FROM document_fragments WHERE document_id = ? ORDER BY created_at ASC",
+                (doc_id,),
+            ).fetchall()
+            name_stem = Path(doc["original_name"]).stem
+            slug = f"doc-{slugify(name_stem)}"
+            file_path = str(wiki_path / "doc" / f"{slugify(name_stem)}.md")
+            content = generate_doc_page(doc, fragments, ollama_url, model)
+            upsert_wiki_page(conn, slug, "doc", doc["original_name"], content, file_path, [doc_id])
+            set_wiki_status(conn, doc_id, "generated", page_slug=slug)
+
+        elif file_type == "pptx":
+            fragments = conn.execute(
+                "SELECT * FROM document_fragments WHERE document_id = ? ORDER BY slide_number ASC, created_at ASC",
+                (doc_id,),
+            ).fetchall()
+            name_stem = Path(doc["original_name"]).stem
+            slug = f"presentation-{slugify(name_stem)}"
+            file_path = str(wiki_path / "presentation" / f"{slugify(name_stem)}.md")
+            content = generate_presentation_page(doc, fragments, ollama_url, model)
+            upsert_wiki_page(conn, slug, "presentation", doc["original_name"], content, file_path, [doc_id])
+            set_wiki_status(conn, doc_id, "generated", page_slug=slug)
+
+        elif file_type == "xlsx":
+            fragments = conn.execute(
+                "SELECT * FROM document_fragments WHERE document_id = ? ORDER BY sheet_name ASC, row_number ASC",
+                (doc_id,),
+            ).fetchall()
+            name_stem = Path(doc["original_name"]).stem
+            slug = f"data-{slugify(name_stem)}"
+            file_path = str(wiki_path / "data" / f"{slugify(name_stem)}.md")
+            content = generate_spreadsheet_page(doc, fragments, ollama_url, model)
+            upsert_wiki_page(conn, slug, "data", doc["original_name"], content, file_path, [doc_id])
+            set_wiki_status(conn, doc_id, "generated", page_slug=slug)
+
+        else:
+            print(f"[wiki] Unknown file type: {file_type}", file=sys.stderr)
+            set_wiki_status(conn, doc_id, "wiki_failed", f"Unsupported file type: {file_type}")
+
+    except Exception as exc:
+        error_msg = str(exc)
+        print(f"[wiki] ERROR for doc {doc_id}: {error_msg}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        set_wiki_status(conn, doc_id, "wiki_failed", error_msg[:2000])
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    if len(sys.argv) < 3:
+        print(
+            f"Usage: {sys.argv[0]} <doc_id|all> <db_path> [wiki_path] [ollama_url]",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    doc_id_or_all = sys.argv[1]
+    db_path = sys.argv[2]
+    wiki_path = Path(sys.argv[3]) if len(sys.argv) > 3 else Path(db_path).parent / "wiki"
+    ollama_url = sys.argv[4] if len(sys.argv) > 4 else os.environ.get("OLLAMA_URL", "http://localhost:11434")
+    model = os.environ.get("OLLAMA_MODEL", "gemma3")
+
+    wiki_path.mkdir(parents=True, exist_ok=True)
+
+    conn = get_db(db_path)
+
+    try:
+        if doc_id_or_all == "all":
+            docs = conn.execute(
+                "SELECT id FROM documents WHERE status = 'processed'"
+            ).fetchall()
+            doc_ids = [d["id"] for d in docs]
+            print(f"[wiki] Processing {len(doc_ids)} document(s)")
+        else:
+            doc_ids = [doc_id_or_all]
+
+        for doc_id in doc_ids:
+            process_document(doc_id, conn, wiki_path, ollama_url, model)
+
+        print("[wiki] Done")
+
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    main()

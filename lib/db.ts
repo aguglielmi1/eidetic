@@ -80,6 +80,22 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_chunks_document
     ON chunks(document_id);
+
+  CREATE TABLE IF NOT EXISTS wiki_pages (
+    id           TEXT PRIMARY KEY,
+    slug         TEXT NOT NULL UNIQUE,
+    page_type    TEXT NOT NULL,
+    title        TEXT NOT NULL,
+    content      TEXT NOT NULL,
+    file_path    TEXT NOT NULL,
+    source_doc_ids TEXT NOT NULL DEFAULT '[]',
+    dirty        INTEGER NOT NULL DEFAULT 0,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_wiki_pages_type
+    ON wiki_pages(page_type);
 `);
 
 // Safe column additions — ignored if column already exists
@@ -87,6 +103,9 @@ for (const stmt of [
   "ALTER TABLE documents ADD COLUMN embed_status TEXT",
   "ALTER TABLE documents ADD COLUMN embed_error TEXT",
   "ALTER TABLE documents ADD COLUMN chunk_count INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE documents ADD COLUMN wiki_status TEXT",
+  "ALTER TABLE documents ADD COLUMN wiki_error TEXT",
+  "ALTER TABLE documents ADD COLUMN wiki_page_slug TEXT",
 ]) {
   try { db.exec(stmt); } catch { /* already exists */ }
 }

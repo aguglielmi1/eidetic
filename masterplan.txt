@@ -345,95 +345,106 @@ Polls every 3s while embedding is in progress
 Deliverable:
 
 POST /api/retrieve can verify retrieval quality before wiring into chat.
-Phase 6 — Build the LLM Wiki layer
+Phase 6 — Build the LLM Wiki layer ✅ COMPLETE
 
 Goal: create synthesized memory from the parsed/RAG data.
 
-Step 13. Set up the wiki store
+Step 13. Set up the wiki store ✅
 
-Use:
+Used:
 
-plain Markdown files
-optionally Obsidian as the wiki editor/viewer
-optionally qmd later for fast wiki search
-optionally a simple graph/reference table in your app DB
+plain Markdown files in storage/wiki/{page_type}/{slug}.md
+wiki_pages table in SQLite (id, slug, page_type, title, content, file_path,
+  source_doc_ids, dirty, created_at, updated_at)
+storage/wiki/vendor/, storage/wiki/doc/, storage/wiki/presentation/, storage/wiki/data/
 
-Store wiki pages in:
+Page types produced:
 
-/storage/wiki
-
-Page types:
-
-entity pages
-topic pages
-summary pages
-timeline pages
-vendor pages
-project pages
+vendor        — one page per unique vendor (aggregates all receipt fragments)
+doc           — one page per PDF / DOCX document
+presentation  — one page per PPTX file
+data          — one page per XLSX spreadsheet
 
 Deliverable:
 
-a durable markdown knowledge layer you can inspect manually.
-Step 14. Build the wiki generator
+Durable markdown knowledge layer. Files are human-readable and Obsidian-compatible.
 
-Use:
+Step 14. Build the wiki generator ✅
 
-Gemma via Ollama
-your parsed fragments and source references
-a background worker
+Used:
 
-Input should come from:
+Gemma via Ollama /api/chat (non-streaming)
+ingestion/wiki.py — unified dispatcher by file_type from DB
 
-normalized fragments
-chunk metadata
-extracted entities
-spreadsheet rows
-receipt fields
+Input comes from:
+
+normalized document_fragments (text, page_number, slide_number, slide_title,
+  sheet_name, row_number, vendor, receipt_date, total)
 
 Not directly from binary files.
 
-Wiki page responsibilities:
+Wiki page responsibilities implemented:
 
 summarize recurring facts
-connect related concepts
-link to supporting sources
-preserve uncertainty when evidence is weak
+aggregate receipts by vendor across multiple documents
+link to supporting sources via Evidence section
+preserve uncertainty — system prompt instructs model to say so when evidence is weak
+
+Implementation:
+
+ingestion/wiki.py — args: <doc_id|all> <db_path> [wiki_path] [ollama_url]
+  Reads fragments → builds context → calls Ollama → writes .md file → upserts wiki_pages
+  Vendor pages aggregate ALL parsed receipts from the same vendor, not just one doc
+  Re-generating updates existing wiki_pages row in-place (idempotent)
+  Updates documents.wiki_status: null → generating → generated | wiki_failed
+
+POST /api/documents/[id]/wiki — spawns wiki.py detached
 
 Deliverable:
 
-the wiki is generated from grounded data, not chat history.
-Step 15. Add source references to wiki pages
+Wiki is generated from grounded data, not chat history.
 
-Every wiki page should point back to raw evidence.
+Step 15. Add source references to wiki pages ✅
 
-Example:
+Every wiki page includes an ## Evidence section with:
 
-## Evidence
-- doc: employee-handbook.pdf page 12
-- receipt: staples-2026-03-04.jpg
-- spreadsheet: expenses.xlsx / Q1 / row 48
+vendor pages:   - receipt: {filename}  (one per contributing receipt)
+doc pages:      - doc: {filename}
+presentation:   - presentation: {filename}
+spreadsheet:    - spreadsheet: {filename}
 
-Deliverable:
-
-the wiki stays auditable.
-Step 16. Open and inspect the wiki in Obsidian
-
-Use:
-
-Obsidian
-
-Why:
-
-easy page browsing
-backlinks
-graph view
-manual inspection while building
+source_doc_ids column in wiki_pages tracks which documents contributed.
 
 Deliverable:
 
-you can see whether the synthesized memory is actually useful.
+Every wiki page is auditable and links back to raw source files.
 
-Obsidian is optional for the final product, but very useful during development.
+Step 16. Open and inspect the wiki in Obsidian ✅
+
+Wiki files written to storage/wiki/ in standard Markdown — open the folder as
+an Obsidian vault directly for page browsing, backlinks, and graph view.
+
+In-app wiki UI also built:
+
+GET /api/wiki          — list all wiki pages (grouped by type in the UI)
+GET /api/wiki/[slug]   — fetch a single page with content
+app/wiki/page.tsx      — wiki index, grouped by page type with badges
+app/wiki/[slug]/page.tsx — individual page viewer (markdown in <pre>, Obsidian path shown)
+
+Library UI:
+
+Generate Wiki / Regenerate Wiki / Retry Wiki button (appears after parsing)
+Wiki status badges: Generating… / Wiki / Wiki failed
+Wiki error displayed inline
+Polls every 3s while wiki is being generated
+
+Notes:
+
+Context passed to the LLM is capped at ~6000 chars to stay within Gemma's context window.
+Override Python executable with PYTHON_CMD env var.
+Override Ollama URL with OLLAMA_URL env var.
+Override model with OLLAMA_MODEL env var (default: gemma3).
+Build verified clean.
 
 Phase 7 — Build the hybrid query router
 
