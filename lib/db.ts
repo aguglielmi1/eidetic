@@ -5,8 +5,9 @@ import fs from "fs";
 const DB_DIR = path.join(process.cwd(), "storage");
 const DB_PATH = path.join(DB_DIR, "eidetic.db");
 
-if (!fs.existsSync(DB_DIR)) {
-  fs.mkdirSync(DB_DIR, { recursive: true });
+for (const sub of ["", "raw", "processed", "failed", "wiki", "chroma"]) {
+  const dir = path.join(DB_DIR, sub);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
 const db = new Database(DB_PATH);
@@ -34,6 +35,60 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_messages_conversation
     ON messages(conversation_id, created_at);
+
+  CREATE TABLE IF NOT EXISTS documents (
+    id             TEXT PRIMARY KEY,
+    original_name  TEXT NOT NULL,
+    file_type      TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'queued',
+    file_path      TEXT NOT NULL,
+    file_size      INTEGER NOT NULL,
+    fragment_count INTEGER NOT NULL DEFAULT 0,
+    error_message  TEXT,
+    created_at     INTEGER NOT NULL,
+    updated_at     INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS document_fragments (
+    id           TEXT PRIMARY KEY,
+    document_id  TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    text         TEXT NOT NULL,
+    fragment_type TEXT NOT NULL,
+    page_number  INTEGER,
+    slide_number INTEGER,
+    slide_title  TEXT,
+    sheet_name   TEXT,
+    row_number   INTEGER,
+    vendor       TEXT,
+    receipt_date TEXT,
+    total        TEXT,
+    metadata_json TEXT,
+    created_at   INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_fragments_document
+    ON document_fragments(document_id);
+
+  CREATE TABLE IF NOT EXISTS chunks (
+    id          TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    fragment_id TEXT NOT NULL REFERENCES document_fragments(id) ON DELETE CASCADE,
+    text        TEXT NOT NULL,
+    chroma_id   TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_chunks_document
+    ON chunks(document_id);
 `);
+
+// Safe column additions — ignored if column already exists
+for (const stmt of [
+  "ALTER TABLE documents ADD COLUMN embed_status TEXT",
+  "ALTER TABLE documents ADD COLUMN embed_error TEXT",
+  "ALTER TABLE documents ADD COLUMN chunk_count INTEGER NOT NULL DEFAULT 0",
+]) {
+  try { db.exec(stmt); } catch { /* already exists */ }
+}
 
 export default db;

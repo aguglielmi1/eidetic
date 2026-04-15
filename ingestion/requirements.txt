@@ -1,0 +1,18 @@
+# Eidetic ingestion dependencies
+# Install with: pip install -r ingestion/requirements.txt
+
+# Document & PDF parsing
+unstructured[pdf,docx]
+
+# PowerPoint parsing
+python-pptx
+
+# Spreadsheet parsing
+openpyxl
+
+# Receipt OCR
+pytesseract
+Pillow
+
+# RAG — vector store
+chromadb
