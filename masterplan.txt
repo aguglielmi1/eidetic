@@ -446,62 +446,78 @@ Override Ollama URL with OLLAMA_URL env var.
 Override model with OLLAMA_MODEL env var (default: gemma3).
 Build verified clean.
 
-Phase 7 — Build the hybrid query router
+Phase 7 — Build the hybrid query router ✅ COMPLETE
 
 Goal: decide when to use raw RAG, wiki, or both.
 
-Step 17. Create a retrieval orchestration API
+Step 17. Create a retrieval orchestration API ✅
 
-Use:
+Used:
 
-Next.js route handlers or a small backend service
+lib/queryRouter.ts — classification + retrieval orchestration
+Modified app/api/conversations/[id]/messages/route.ts — inject context before Ollama call
 
-Responsibilities:
+Query categories implemented:
 
-classify the question
-choose rag, wiki, or hybrid
-gather supporting context
-build the final prompt
-call Ollama
-stream the result back
+lookup           → RAG   (price, cost, date, how many, receipt, total, amount, invoice)
+summary          → wiki first (summarize, overview, what is, tell me about, explain, how does)
+comparison       → hybrid (compare, versus, vs, difference between, better than)
+trend            → hybrid (trend, over time, historically, pattern, growth, decline)
+citation_required→ RAG   (source, proof, evidence, cite, reference, verify)
+chat             → no context (everything else — pure conversation)
 
-Suggested query modes:
+Routing logic:
 
-lookup
-summary
-comparison
-trend
-citation_required
-
-Routing:
-
-lookup → RAG
-summary → wiki first
-comparison/trend → hybrid
-citation_required → RAG mandatory
+lookup / citation_required → RAG only
+summary → wiki first; falls back to RAG if no wiki pages match
+comparison / trend → hybrid (wiki + RAG together)
+chat → passes message history to Ollama with no injected context
 
 Deliverable:
 
-one chat endpoint that intelligently decides how to answer.
-Step 18. Build hybrid context assembly
+lib/queryRouter.ts exposes routeQuery(query) which classifies the question,
+runs retrieval, and returns { mode, category, systemPrompt, chunks, wikiPages, hasContext }.
+The messages route prepends a typed system message when context was found.
+X-Route-Mode header is returned on every chat response.
+
+Step 18. Build hybrid context assembly ✅
 
 For hybrid mode:
 
-pull top wiki pages
-pull supporting raw chunks
-send both to the LLM
-instruct the model to trust raw evidence over synthesized pages
+pull top wiki pages (up to 3, SQLite LIKE search on title + content)
+pull top RAG chunks (up to 5, via retrieve.py + Chroma)
+send both to Ollama as a system message ahead of chat history
+instruct model: raw sources are authoritative; wiki is synthesized memory; cite evidence; do not invent
 
-System rules:
+System rules enforced:
 
 raw source is authoritative
 wiki is a convenience layer
 cite raw evidence when possible
 do not invent support
 
+Context limits:
+
+each wiki page capped at 1 500 chars in the system prompt
+each RAG chunk capped at 500 chars in the system prompt
+
 Deliverable:
 
 better summaries without losing grounding.
+
+Sources UI:
+
+sources_json column (already in messages table) populated for every assistant reply
+after stream ends, ChatView fetches the saved message to load sources_json
+each assistant bubble shows a mode badge (RAG / Wiki / Hybrid) + compact source list
+(filename · page N, slide N, vendor, wiki page title + type)
+
+Notes:
+
+No new API routes added — orchestration lives inside the existing messages route.
+queryRouter.ts gracefully degrades: if Chroma is empty or wiki has no pages, falls
+  back to chat mode automatically (no errors surfaced to user).
+Build verified clean.
 Phase 8 — Make the wiki update automatically from RAG changes
 
 Goal: keep the synthesized memory fresh without full rebuilds.
