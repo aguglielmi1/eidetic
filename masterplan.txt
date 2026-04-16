@@ -518,79 +518,161 @@ No new API routes added — orchestration lives inside the existing messages rou
 queryRouter.ts gracefully degrades: if Chroma is empty or wiki has no pages, falls
   back to chat mode automatically (no errors surfaced to user).
 Build verified clean.
-Phase 8 — Make the wiki update automatically from RAG changes
+Phase 8 — Make the wiki update automatically from RAG changes ✅ COMPLETE
 
 Goal: keep the synthesized memory fresh without full rebuilds.
 
-Step 19. Add file hashing and change detection
+Step 19. Add file hashing and change detection ✅
 
-Use:
+Used:
 
-checksums or modified timestamps
-a job queue table in your app DB
+SHA-256 content hashing via Node.js crypto (computed at upload time)
+job_queue table in SQLite (id, job_type, target_id, status, reason, error, timestamps)
 
-Track:
+content_hash column added to documents table:
 
-new files
-updated files
-deleted files
+computed from raw file bytes at upload
+returned in upload response with duplicate flag (true if same-name file with identical hash exists)
+
+Job queue tracks:
+
+pending rewiki jobs (created when documents change or are deleted)
+running / completed / failed status for each rebuild task
 
 Deliverable:
 
-only changed files get reprocessed.
-Step 20. Mark affected wiki pages as dirty
+only changed files get reprocessed. Duplicate uploads detected at upload time.
+
+Step 20. Mark affected wiki pages as dirty ✅
+
+Dirty marking happens at three points:
+
+re-parse (parse.py):  after successful parse, scans wiki_pages.source_doc_ids
+                       for the parsed doc_id → sets dirty = 1 + enqueues rewiki job
+
+re-embed (embed.py):  after successful embedding, same dirty marking logic
+
+delete (DELETE /api/documents/[id]):  before deletion, marks wiki pages
+                                       referencing the doc as dirty + enqueues rewiki job
+
+Job deduplication: pending rewiki jobs for the same wiki page slug are not duplicated.
 
 Examples:
 
 new Staples receipt → vendor page “Staples” dirty
-new onboarding deck → onboarding topic page dirty
-updated spreadsheet with expenses → monthly expense summary dirty
+re-parsed onboarding deck → onboarding doc page dirty
+deleted spreadsheet → monthly expense data page dirty
 
 Deliverable:
 
 wiki rebuilds become incremental instead of global.
-Step 21. Rebuild only affected wiki pages
 
-Use:
+Step 21. Rebuild only affected wiki pages ✅
 
-background jobs
-your wiki generator worker
+Used:
 
-Deliverable:
+ingestion/wiki.py `dirty` mode — rebuilds only wiki pages marked dirty
+POST /api/wiki/rebuild-dirty — spawns wiki.py in dirty mode
+GET /api/wiki/rebuild-dirty — returns dirty page count + pending jobs
 
-fast, maintainable synthesized memory.
-Phase 9 — Make it usable from phone and other devices
+Rebuild logic:
+
+find all wiki_pages with dirty = 1
+for each dirty page, gather valid source documents
+if all sources deleted → remove orphaned wiki page + markdown file
+otherwise → re-run process_document for the first source doc
+  (vendor pages automatically aggregate all docs for that vendor)
+job_queue entries updated: pending → running → completed | failed
+
+Library UI:
+
+amber banner shows count of out-of-date wiki pages
+“Rebuild Dirty Pages” button triggers incremental rebuild
+polls every 3s while rebuild is in progress
+dirty count auto-clears when rebuild finishes
+
+Wiki page index:
+
+“Out of date” badge shown on dirty wiki pages in /wiki index
+
+API routes added:
+
+POST /api/wiki/rebuild-dirty — trigger dirty rebuild
+GET  /api/wiki/rebuild-dirty — check dirty status + pending jobs
+
+Notes:
+
+wiki_pages.dirty is set to 0 by upsert_wiki_page (existing behavior from Phase 6).
+Build verified clean.
+No full rebuild needed — only dirty pages are touched.
+Phase 9 — Make it usable from phone and other devices ✅ COMPLETE
 
 Goal: reach the app like you would a chat app.
 
-Step 22. Start with LAN access
+Step 22. Start with LAN access ✅
 
-Simplest first:
+Used:
 
-run Next.js on your desktop/server
-access it from your phone browser on the same network
+Next.js --hostname 0.0.0.0 binding (both dev and start scripts)
+allowedDevOrigins in next.config.ts for dev mode LAN access
+GET /api/network-info endpoint (returns LAN IPs + access URLs)
+
+Configuration:
+
+package.json dev and start scripts bind to 0.0.0.0 explicitly
+next.config.ts allowedDevOrigins allows *.local, 192.168.*.*, 10.*.*.*, 172.16.*.*
+  (required so dev mode accepts requests from LAN IP origins)
+
+Mobile PWA setup:
+
+public/manifest.json — web app manifest (standalone display, dark theme)
+public/icon.svg — app icon
+app/layout.tsx — viewport meta (device-width, no zoom, viewport-fit cover),
+  theme-color #09090b, apple-mobile-web-app-capable, manifest link
+
+Mobile UX polish:
+
+Safe area insets for notched phones (safe-top, safe-bottom CSS classes)
+  applied to AppShell header, Sidebar logo area, ChatView input area
+Hamburger menu icon replaced with proper SVG (better touch target)
+Library page action buttons wrap on narrow screens (flex-wrap)
+
+Settings page — Network Access section:
+
+Displays all LAN URLs for the current machine
+Copy button for each URL
+Shows all network interfaces with address and family
+Instructions for iOS "Add to Home Screen"
 
 Deliverable:
 
-first remote usage without extra infrastructure.
-Step 23. Add secure remote access
+App accessible from any device on the same network.
+Feels like a native app when added to phone home screen.
 
-Use one of:
+Step 23. Add secure remote access ✅
 
-Tailscale for easy private access
-or your normal public web hosting approach if you want to expose the app
+Used:
 
-If private/personal:
+Tailscale (documentation and setup guide in Settings page)
 
-Tailscale is the easiest option
+Settings page — Remote Access section:
 
-If public/productized:
-
-host the Next.js app normally and keep model/vector services private behind it
+Step-by-step Tailscale setup instructions
+  1. Install Tailscale on host machine and phone
+  2. Sign in with same account on both
+  3. Access at http://<tailscale-ip>:3000
+Explanation of what Tailscale provides (encrypted private network, no port forwarding)
 
 Deliverable:
 
-you can use the assistant from your phone anywhere.
+Clear path to phone access from anywhere via Tailscale.
+
+Notes:
+
+All Ollama calls happen server-side — LAN/remote clients never need to reach
+  Ollama directly, only the Next.js server.
+No auth added yet — this is a personal/local tool. Add if exposing publicly.
+Build verified clean.
 Phase 10 — Add trust, debugging, and polish
 
 Goal: make the system reliable enough to keep using.
