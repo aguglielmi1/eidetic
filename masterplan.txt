@@ -763,6 +763,216 @@ Build verified clean.
 No new dependencies added.
 Inspection page links bidirectionally with wiki review page (doc → wiki, wiki → doc).
 Sources UI was already complete from Phase 7 — no changes needed.
+
+Phase 11 — Secure remote access with Tailscale Funnel + auth ✅ COMPLETE
+
+Goal: access eidetic from anywhere over HTTPS with no VPN client on the phone,
+protected by real authentication so the Funnel URL is not an open door.
+
+Implementation note:
+
+The original plan specified NextAuth (Auth.js v5), but Next.js 16 renamed
+middleware.ts to proxy.ts and deprecated the middleware convention. NextAuth v5
+relies on wrapping the middleware function, which conflicts with proxy.ts.
+Instead, custom JWT session management was implemented using jose (recommended
+by the Next.js 16 authentication guide). This is simpler, has zero compatibility
+issues, and is a better fit for a single-user personal tool.
+
+Step 28. Install and configure Tailscale Funnel ✅
+
+Prerequisites:
+
+Tailscale installed on the host machine (already recommended in Phase 9)
+Tailscale account with MagicDNS enabled
+Funnel enabled on the tailnet (admin console → DNS → Enable HTTPS,
+  then admin console → Access controls → add "funnel" attribute to the node)
+
+Setup:
+
+tailscale funnel 3000
+
+This creates a public HTTPS endpoint at https://<hostname>.<tailnet>.ts.net
+that proxies to localhost:3000. No client-side VPN or app needed — the phone
+just opens the URL in a browser.
+
+Make it persistent:
+
+tailscale funnel --bg 3000
+
+Or run as a system service so it survives reboots. On Windows, Tailscale
+already runs as a service — the funnel flag persists automatically.
+
+Next.js configuration:
+
+The app receives requests through Tailscale's reverse proxy.
+The 0.0.0.0 binding from Phase 9 already handles this — no additional config needed.
+
+Deliverable:
+
+eidetic is reachable from any device anywhere via a stable HTTPS URL.
+No VPN app, no port forwarding, no dynamic DNS.
+
+Step 29. Set up JWT session management ✅
+
+Used:
+
+jose — JWT signing and verification library (recommended by Next.js 16 docs)
+  Works in all runtimes (Node.js, Edge, Proxy)
+
+Installed:
+
+npm install jose
+
+Created:
+
+lib/auth.ts — central auth module (server-only)
+  encrypt(payload) — signs a JWT with HS256
+  decrypt(session) — verifies and decodes a JWT
+  createSession() — creates a 30-day session cookie (eidetic-session)
+  deleteSession() — removes the session cookie
+  verifySession() — reads cookie, verifies JWT, checks expiry
+  login(password) — validates against EIDETIC_PASSWORD env var, creates session
+  logout() — deletes session and redirects to /login
+
+Environment:
+
+.env.local:
+  AUTH_SECRET=<generated base64 secret>
+  EIDETIC_PASSWORD=<your chosen password>
+
+.env.local is in .gitignore (.env* pattern already present).
+
+Deliverable:
+
+JWT-based session management with httpOnly secure cookies.
+
+Step 30. Add the login page ✅
+
+Created:
+
+app/login/page.tsx — login form
+  - Dark-themed, centered card matching the app's design
+  - Single password field + submit button
+  - Error message on wrong password
+  - Redirects to /chat on success
+  - Loading state during submission
+
+app/api/auth/login/route.ts — POST endpoint
+  - Validates password, calls login(), sets session cookie
+  - Returns 401 with error message on wrong password
+
+app/api/auth/logout/route.ts — POST endpoint
+  - Deletes session cookie
+
+Deliverable:
+
+Clean login page that gates access to the app.
+
+Step 31. Protect all routes with proxy.ts ✅
+
+Created:
+
+proxy.ts at the project root (Next.js 16 replacement for middleware.ts)
+
+Proxy logic:
+
+Checks for eidetic-session cookie on every request.
+Verifies JWT signature and expiry using jose.
+Allows without auth: /login, /api/auth/*, /_next/*, static assets (manifest, icon, favicon).
+Pages without auth → redirect to /login.
+API routes without auth → 401 JSON response.
+
+export const config = {
+  matcher: ["/((?!_next/static|_next/image|manifest\\.json|icon\\.svg|favicon\\.ico).*)"],
+}
+
+Deliverable:
+
+Unauthenticated requests to any page or API redirect to /login.
+After login, session cookie grants access everywhere.
+API routes return 401 JSON (not redirect) for direct API access.
+
+Step 32. Add session UI to the app shell ✅
+
+Modified:
+
+components/AppShell.tsx:
+  - Detects /login pathname and hides sidebar entirely (no nav before auth)
+  - Login page renders full-screen without app shell chrome
+
+components/Sidebar.tsx:
+  - Added sign-out button in sidebar footer with log-out icon
+  - Calls POST /api/auth/logout then redirects to /login
+  - Matches existing dark theme styling
+
+Deliverable:
+
+You can sign out from the app. No sidebar shown before login.
+
+Step 33. Update Settings page with Funnel info ✅
+
+Modified:
+
+app/settings/page.tsx:
+  - Replaced old "Remote Access" section with "Secure Remote Access"
+  - If TAILSCALE_FUNNEL_URL is set: shows Funnel URL with copy button,
+    auth status ("Protected by password"), and password change reminder
+  - If not set: shows step-by-step Funnel setup instructions
+  - Added "Authentication" section showing auth status, method, session duration
+
+app/api/network-info/route.ts:
+  - Added funnelUrl field (reads TAILSCALE_FUNNEL_URL env var)
+
+Environment variable:
+
+TAILSCALE_FUNNEL_URL — optional, set to your Funnel URL for display.
+If not set, Settings shows setup instructions instead.
+
+Deliverable:
+
+Settings page shows the full remote access + auth picture.
+
+Step 34. Test end-to-end
+
+Test checklist:
+
+1. Start the app: npm run dev
+2. Open the Funnel URL on your phone (mobile data, not WiFi)
+3. Confirm redirect to /login
+4. Enter password, confirm redirect to /chat
+5. Upload a file, parse, embed, generate wiki — all work through Funnel
+6. Chat with documents — streaming works through Funnel's HTTPS proxy
+7. Open /settings — Funnel URL displayed
+8. Sign out — confirm redirect back to /login
+9. Try accessing /api/documents directly without session — confirm 401
+10. Add to home screen on iOS/Android — PWA still works with Funnel URL
+
+Edge cases to verify:
+
+- Streaming chat responses through Funnel (chunked transfer encoding over HTTPS)
+- Large file uploads through Funnel (check max body size, may need config)
+- Session persistence across app restarts (30-day JWT cookie)
+- Funnel persistence across machine reboots
+
+Deliverable:
+
+Eidetic is securely accessible from anywhere. Phone opens a URL, enters
+a password once, and has full access. No VPN client needed.
+
+Notes:
+
+Auth is deliberately simple — single password, no user management.
+If multi-user is ever needed, swap for an OAuth provider and add a users table.
+The proxy.ts + session cookie infrastructure stays the same.
+
+Tailscale Funnel has rate limits on the free tier. For heavy use,
+consider upgrading or switching to Cloudflare Tunnel + Access.
+
+The AUTH_SECRET and EIDETIC_PASSWORD must never be committed to git.
+.env.local is in .gitignore.
+
+Build verified clean.
+
 Recommended tools by layer
 App layer
 Next.js
