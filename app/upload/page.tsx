@@ -39,12 +39,12 @@ export default function UploadPage() {
     setFiles((prev) => [
       ...prev,
       ...valid.map((f) => ({
-        id: crypto.randomUUID(),
+        id: crypto.randomUUID?.() ?? Math.random().toString(36).slice(2) + Date.now().toString(36),
         file: f,
         status: "pending" as const,
       })),
       ...invalid.map((f) => ({
-        id: crypto.randomUUID(),
+        id: crypto.randomUUID?.() ?? Math.random().toString(36).slice(2) + Date.now().toString(36),
         file: f,
         status: "error" as const,
         error: `Unsupported type: .${fileExt(f.name)}`,

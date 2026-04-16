@@ -17,6 +17,7 @@ interface Document {
   chunk_count: number;
   error_message: string | null;
   embed_error: string | null;
+  ignored: number;
   created_at: number;
   updated_at: number;
 }
@@ -141,6 +142,18 @@ export default function LibraryPage() {
     load();
   };
 
+  const toggleIgnore = async (doc: Document) => {
+    const newVal = doc.ignored ? 0 : 1;
+    await fetch(`/api/documents/${doc.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ignored: newVal }),
+    });
+    setDocs((prev) =>
+      prev.map((d) => (d.id === doc.id ? { ...d, ignored: newVal } : d))
+    );
+  };
+
   const remove = async (doc: Document) => {
     if (!confirm(`Delete "${doc.original_name}"?`)) return;
     await fetch(`/api/documents/${doc.id}`, { method: "DELETE" });
@@ -214,16 +227,19 @@ export default function LibraryPage() {
           return (
             <li
               key={doc.id}
-              className="rounded-xl bg-zinc-900 border border-zinc-800 px-4 py-3 flex flex-col gap-2"
+              className={`rounded-xl bg-zinc-900 border border-zinc-800 px-4 py-3 flex flex-col gap-2 ${doc.ignored ? "opacity-60" : ""}`}
             >
               <div className="flex items-start gap-3">
                 <span className="text-2xl shrink-0 mt-0.5">
                   {TYPE_ICON[doc.file_type] ?? "📄"}
                 </span>
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-zinc-100 truncate">
+                  <button
+                    onClick={() => router.push(`/library/${doc.id}`)}
+                    className="text-sm font-medium text-zinc-100 truncate hover:text-blue-400 transition-colors text-left block w-full"
+                  >
                     {doc.original_name}
-                  </p>
+                  </button>
                   <p className="text-xs text-zinc-500 mt-0.5">
                     {formatBytes(doc.file_size)} · {doc.file_type.toUpperCase()} · {timeAgo(doc.created_at)}
                   </p>
@@ -240,6 +256,11 @@ export default function LibraryPage() {
                   {wikiBadge && (
                     <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${wikiBadge.classes}`}>
                       {wikiBadge.label}
+                    </span>
+                  )}
+                  {doc.ignored === 1 && (
+                    <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-zinc-700 text-zinc-400">
+                      Ignored
                     </span>
                   )}
                 </div>
@@ -321,6 +342,18 @@ export default function LibraryPage() {
                       : "Generate Wiki"}
                   </button>
                 )}
+                <button
+                  onClick={() => toggleIgnore(doc)}
+                  className="text-xs px-3 py-1.5 rounded-lg text-zinc-500 hover:text-amber-400 hover:bg-amber-900/20 transition-colors"
+                >
+                  {doc.ignored ? "Unignore" : "Ignore"}
+                </button>
+                <button
+                  onClick={() => router.push(`/library/${doc.id}`)}
+                  className="text-xs px-3 py-1.5 rounded-lg text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-colors"
+                >
+                  Inspect
+                </button>
                 <button
                   onClick={() => remove(doc)}
                   className="text-xs px-3 py-1.5 rounded-lg text-zinc-600 hover:text-red-400 hover:bg-red-900/20 transition-colors"

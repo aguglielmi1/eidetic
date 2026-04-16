@@ -149,14 +149,14 @@ export default function ChatView({
     setInput("");
 
     const userMsg: Message = {
-      id: crypto.randomUUID(),
+      id: crypto.randomUUID?.() ?? Math.random().toString(36).slice(2) + Date.now().toString(36),
       role: "user",
       content,
       sources_json: null,
       created_at: Date.now(),
     };
     const assistantMsg: Message = {
-      id: crypto.randomUUID(),
+      id: crypto.randomUUID?.() ?? Math.random().toString(36).slice(2) + Date.now().toString(36),
       role: "assistant",
       content: "",
       sources_json: null,
