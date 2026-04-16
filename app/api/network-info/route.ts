@@ -26,5 +26,6 @@ export async function GET() {
     urls: addresses
       .filter((a) => a.family === "IPv4")
       .map((a) => `http://${a.address}:${port}`),
+    funnelUrl: process.env.TAILSCALE_FUNNEL_URL || null,
   });
 }

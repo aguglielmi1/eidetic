@@ -55,6 +55,12 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
     if (pathname === `/chat/${id}`) router.push("/chat");
   };
 
+  const handleSignOut = async () => {
+    await fetch("/api/auth/logout", { method: "POST" });
+    router.push("/login");
+    router.refresh();
+  };
+
   return (
     <>
       {/* Backdrop (mobile) */}
@@ -143,6 +149,21 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
               </ul>
             </>
           )}
+        </div>
+
+        {/* Session footer */}
+        <div className="px-3 py-3 border-t border-zinc-700">
+          <button
+            onClick={handleSignOut}
+            className="w-full flex items-center gap-2 rounded-md px-3 py-2 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-white transition-colors"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+              <polyline points="16 17 21 12 16 7" />
+              <line x1="21" y1="12" x2="9" y2="12" />
+            </svg>
+            Sign out
+          </button>
         </div>
       </aside>
     </>

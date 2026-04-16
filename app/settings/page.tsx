@@ -10,11 +10,15 @@ interface NetworkInfo {
 
 export default function SettingsPage() {
   const [network, setNetwork] = useState<NetworkInfo | null>(null);
+  const [funnelUrl, setFunnelUrl] = useState<string>("");
 
   useEffect(() => {
     fetch("/api/network-info")
       .then((r) => r.json())
-      .then(setNetwork)
+      .then((data) => {
+        setNetwork(data);
+        if (data.funnelUrl) setFunnelUrl(data.funnelUrl);
+      })
       .catch(() => {});
   }, []);
 
@@ -113,34 +117,92 @@ export default function SettingsPage() {
           )}
         </div>
 
-        {/* Remote Access */}
+        {/* Secure Remote Access */}
         <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-5">
-          <h2 className="text-sm font-medium text-zinc-300 mb-3">Remote Access</h2>
-          <p className="text-sm text-zinc-400 mb-3">
-            To access eidetic from outside your local network, use{" "}
-            <a
-              href="https://tailscale.com"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-blue-400 hover:text-blue-300 underline"
-            >
-              Tailscale
-            </a>{" "}
-            for easy private access:
-          </p>
-          <ol className="space-y-2 text-sm text-zinc-400 list-decimal list-inside">
-            <li>Install Tailscale on this machine and your phone</li>
-            <li>Sign in with the same account on both devices</li>
-            <li>
-              Access eidetic at{" "}
-              <code className="text-zinc-300">
-                http://&lt;tailscale-ip&gt;:{network?.port ?? "3000"}
-              </code>
-            </li>
-          </ol>
+          <h2 className="text-sm font-medium text-zinc-300 mb-3">Secure Remote Access</h2>
+
+          {funnelUrl ? (
+            <>
+              <div className="space-y-2 text-sm text-zinc-400 mb-3">
+                <div className="flex items-center justify-between">
+                  <span>Funnel URL</span>
+                  <div className="flex items-center gap-2">
+                    <code className="text-blue-400">{funnelUrl}</code>
+                    <button
+                      onClick={() => navigator.clipboard.writeText(funnelUrl)}
+                      className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+                    >
+                      Copy
+                    </button>
+                  </div>
+                </div>
+                <div className="flex justify-between">
+                  <span>Auth</span>
+                  <span className="text-green-400">Protected by password</span>
+                </div>
+              </div>
+              <p className="text-xs text-zinc-600">
+                Access eidetic from anywhere via the Funnel URL above. No VPN client needed
+                — just open the URL on your phone and sign in.
+              </p>
+              <p className="mt-2 text-xs text-zinc-600">
+                Change your password by updating EIDETIC_PASSWORD in .env.local and restarting.
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="text-sm text-zinc-400 mb-3">
+                Use{" "}
+                <a
+                  href="https://tailscale.com"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-blue-400 hover:text-blue-300 underline"
+                >
+                  Tailscale Funnel
+                </a>{" "}
+                to access eidetic from anywhere over HTTPS:
+              </p>
+              <ol className="space-y-2 text-sm text-zinc-400 list-decimal list-inside">
+                <li>Install Tailscale on this machine</li>
+                <li>Enable HTTPS in admin console (DNS settings)</li>
+                <li>
+                  Run:{" "}
+                  <code className="text-zinc-300">tailscale funnel --bg 3000</code>
+                </li>
+                <li>
+                  Set <code className="text-zinc-300">TAILSCALE_FUNNEL_URL</code> in
+                  .env.local to your Funnel URL
+                </li>
+              </ol>
+              <p className="mt-3 text-xs text-zinc-600">
+                Funnel creates a public HTTPS endpoint — no VPN app needed on the phone.
+                Auth protects the app with a password.
+              </p>
+            </>
+          )}
+        </div>
+
+        {/* Authentication */}
+        <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-5">
+          <h2 className="text-sm font-medium text-zinc-300 mb-3">Authentication</h2>
+          <div className="space-y-2 text-sm text-zinc-400">
+            <div className="flex justify-between">
+              <span>Status</span>
+              <span className="text-green-400">Active</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Method</span>
+              <code className="text-zinc-300">Password (single user)</code>
+            </div>
+            <div className="flex justify-between">
+              <span>Session duration</span>
+              <code className="text-zinc-300">30 days</code>
+            </div>
+          </div>
           <p className="mt-3 text-xs text-zinc-600">
-            Tailscale creates an encrypted private network between your devices.
-            No port forwarding or public exposure needed.
+            All pages and API routes are protected. Change your password by updating
+            EIDETIC_PASSWORD in .env.local.
           </p>
         </div>
       </section>
