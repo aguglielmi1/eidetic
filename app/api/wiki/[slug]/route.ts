@@ -26,8 +26,18 @@ export async function GET(
     return Response.json({ error: "Not found" }, { status: 404 });
   }
 
+  const sourceIds: string[] = JSON.parse(page.source_doc_ids ?? "[]");
+
+  // Fetch source document details
+  const sourceDocs = sourceIds.length > 0
+    ? db.prepare(
+        `SELECT id, original_name, file_type, status FROM documents WHERE id IN (${sourceIds.map(() => "?").join(",")})`
+      ).all(...sourceIds) as { id: string; original_name: string; file_type: string; status: string }[]
+    : [];
+
   return Response.json({
     ...page,
-    source_doc_ids: JSON.parse(page.source_doc_ids ?? "[]"),
+    source_doc_ids: sourceIds,
+    sourceDocs,
   });
 }

@@ -673,62 +673,96 @@ All Ollama calls happen server-side — LAN/remote clients never need to reach
   Ollama directly, only the Next.js server.
 No auth added yet — this is a personal/local tool. Add if exposing publicly.
 Build verified clean.
-Phase 10 — Add trust, debugging, and polish
+Phase 10 — Add trust, debugging, and polish ✅ COMPLETE
 
 Goal: make the system reliable enough to keep using.
 
-Step 24. Show sources in the UI
+Step 24. Show sources in the UI ✅ (completed in Phase 7)
 
-Under each answer, show:
+Already implemented in Phase 7's ChatView:
 
-source chunks
-file name
-page/slide/sheet/row references
-wiki pages used
-answer mode (rag, wiki, hybrid)
+SourcesPanel component under each assistant message
+mode badges: RAG (blue), Wiki (purple), Hybrid (teal)
+source chunks with file name, page/slide/sheet/row, vendor, score
+wiki pages used with title and type
+answer mode displayed via X-Route-Mode header
 
 Deliverable:
 
 you can tell why the system said what it said.
-Step 25. Add a file inspection page
 
-Show:
+Step 25. Add a file inspection page ✅
 
-raw file
-parsed fragments
-chunked output
-metadata
-embeddings status
-linked wiki pages
+Used:
+
+app/library/[id]/page.tsx — new document detail/inspection page
+Enhanced GET /api/documents/[id] — returns fragments, chunks, and linked wiki pages
+
+Shows:
+
+document metadata grid (size, type, upload date, fragment count, chunk count, hash)
+status badges for parse, embed, and wiki stages
+error details for any failed stage (parse, embed, wiki)
+parsed fragments list with expandable text preview and metadata
+indexed chunks list (collapsible) with Chroma IDs and text preview
+linked wiki pages with clickable navigation to wiki review page
+full action controls (parse, embed, wiki, ignore, delete)
+storage file path
 
 Deliverable:
 
 you can debug ingestion problems quickly.
-Step 26. Add a wiki review page
 
-Show:
+Step 26. Add a wiki review page ✅
 
-generated markdown
-linked evidence
-last updated time
-confidence / quality notes
+Used:
+
+Enhanced app/wiki/[slug]/page.tsx — full review UI
+Enhanced GET /api/wiki/[slug] — returns source document details (name, type, status)
+
+Shows:
+
+rendered markdown (headers, bold, italic, lists, rules) with raw toggle
+linked evidence section — clickable source documents linking to /library/[id]
+last updated time (absolute + relative)
+quality notes: outdated warning when dirty, staleness warning when >7 days old
+regenerate button (triggers per-page rebuild via new API)
+Obsidian file path for external editing
+
+New API:
+
+POST /api/wiki/[slug]/rebuild — regenerate a single wiki page from its source document
 
 Deliverable:
 
 you can inspect and improve synthesized pages.
-Step 27. Add manual controls
 
-Useful admin actions:
+Step 27. Add manual controls ✅
 
-reparse file
-re-embed file
-rebuild wiki page
-rebuild all dirty pages
-mark file as ignored
+Controls available on library list page + inspection page:
+
+reparse file        — Parse / Re-parse / Retry parse button
+re-embed file       — Embed / Re-embed / Retry embed button
+rebuild wiki page   — Generate Wiki / Regenerate / Retry button (per-doc)
+                      + Regenerate button on wiki review page (per-page)
+rebuild all dirty   — "Rebuild Dirty Pages" banner button (existing)
+mark file as ignored— Ignore / Unignore toggle on list + inspection page
+
+New DB column: documents.ignored (INTEGER DEFAULT 0)
+New API: PATCH /api/documents/[id] — toggle ignored flag
+Library list: ignored docs dimmed with badge, clickable name links to inspection page
+Inspection page: full control panel with all actions in one place
 
 Deliverable:
 
 easier iteration during development.
+
+Notes:
+
+Build verified clean.
+No new dependencies added.
+Inspection page links bidirectionally with wiki review page (doc → wiki, wiki → doc).
+Sources UI was already complete from Phase 7 — no changes needed.
 Recommended tools by layer
 App layer
 Next.js

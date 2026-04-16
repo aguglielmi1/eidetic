@@ -107,6 +107,7 @@ for (const stmt of [
   "ALTER TABLE documents ADD COLUMN wiki_error TEXT",
   "ALTER TABLE documents ADD COLUMN wiki_page_slug TEXT",
   "ALTER TABLE documents ADD COLUMN content_hash TEXT",
+  "ALTER TABLE documents ADD COLUMN ignored INTEGER NOT NULL DEFAULT 0",
 ]) {
   try { db.exec(stmt); } catch { /* already exists */ }
 }
