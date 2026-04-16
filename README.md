@@ -1,36 +1,109 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Eidetic
 
-## Getting Started
+A local AI knowledge system. Upload documents, parse them into structured fragments, index them in a vector database, generate a persistent markdown wiki, and query everything through a chat interface that routes questions to raw retrieval, synthesized memory, or both.
 
-First, run the development server:
+## Prerequisites
+
+- **Node.js** 20+
+- **Python** 3.10+
+- **Ollama** installed and running ([ollama.com](https://ollama.com))
+- **Tesseract OCR** installed and on PATH (for receipt image parsing)
+
+## 1. Install Ollama models
+
+```bash
+ollama pull gemma3
+ollama pull nomic-embed-text
+```
+
+Verify Ollama is running at `http://localhost:11434`.
+
+## 2. Install Node dependencies
+
+```bash
+npm install
+```
+
+## 3. Install Python dependencies
+
+```bash
+pip install -r ingestion/requirements.txt
+```
+
+This installs `unstructured[pdf,docx]`, `python-pptx`, `openpyxl`, `pytesseract`, `Pillow`, and `chromadb`.
+
+## 4. Start the app
+
+Development:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Production:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npm run build
+npm start
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+The app runs at `http://localhost:3000` and binds to `0.0.0.0` so it's accessible from other devices on your LAN.
 
-## Learn More
+## Usage
 
-To learn more about Next.js, take a look at the following resources:
+| Page | Purpose |
+|------|---------|
+| `/chat` | Chat with your documents. Questions are routed to RAG, wiki, or both. |
+| `/upload` | Upload PDF, DOCX, PPTX, XLSX, or receipt images (JPG/PNG). |
+| `/library` | Manage files — parse, embed, generate wiki, inspect, ignore, delete. |
+| `/library/[id]` | Inspect a document: fragments, chunks, metadata, errors, linked wiki pages. |
+| `/wiki` | Browse synthesized wiki pages grouped by type. |
+| `/wiki/[slug]` | Review a wiki page: rendered markdown, source evidence, quality notes, regenerate. |
+| `/settings` | View LAN URLs, Ollama config, Tailscale setup guide. |
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### Workflow
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+1. **Upload** files at `/upload`
+2. **Parse** each file in the library (extracts text fragments)
+3. **Embed** parsed files (indexes chunks in ChromaDB for semantic search)
+4. **Generate Wiki** to synthesize knowledge pages from fragments
+5. **Chat** — ask questions and get grounded answers with source citations
 
-## Deploy on Vercel
+## Storage
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+All data lives in the `storage/` directory (created automatically):
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```
+storage/
+  eidetic.db          # SQLite database
+  raw/{docId}/        # uploaded files
+  chroma/             # ChromaDB vector store
+  wiki/{type}/{slug}.md  # generated markdown (Obsidian-compatible)
+```
+
+Open `storage/wiki/` as an Obsidian vault for browsing, backlinks, and graph view.
+
+## Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OLLAMA_URL` | `http://localhost:11434` | Ollama API endpoint |
+| `OLLAMA_MODEL` | `gemma3` | Chat model name |
+| `EMBED_MODEL` | `nomic-embed-text` | Embedding model name |
+| `PYTHON_CMD` | `python` | Python executable (use `python3` on some systems) |
+
+## Mobile / remote access
+
+The app is a PWA. On your phone, open the LAN URL shown in `/settings` and use "Add to Home Screen" for an app-like experience.
+
+For access outside your local network, install [Tailscale](https://tailscale.com) on both devices and connect via the Tailscale IP at port 3000.
+
+## Tech stack
+
+- **App**: Next.js 16, React 19, Tailwind 4, TypeScript
+- **Database**: SQLite via better-sqlite3
+- **LLM**: Ollama + Gemma 3
+- **Embeddings**: Ollama + nomic-embed-text
+- **Vector store**: ChromaDB
+- **Parsing**: unstructured, python-pptx, openpyxl, pytesseract
+- **Wiki**: Plain markdown files
