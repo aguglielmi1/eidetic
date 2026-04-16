@@ -280,6 +280,43 @@ def parse_image(file_path: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Phase 8 — change detection: mark wiki pages dirty after re-parse
+# ---------------------------------------------------------------------------
+
+def mark_dirty_pages(conn: sqlite3.Connection, doc_id: str):
+    """Find wiki pages whose source_doc_ids include this document and mark them dirty."""
+    now = int(datetime.now().timestamp() * 1000)
+    pages = conn.execute(
+        "SELECT id, slug, source_doc_ids FROM wiki_pages"
+    ).fetchall()
+
+    dirty_count = 0
+    for page in pages:
+        source_ids = json.loads(page["source_doc_ids"] or "[]")
+        if doc_id in source_ids:
+            conn.execute(
+                "UPDATE wiki_pages SET dirty = 1, updated_at = ? WHERE id = ?",
+                (now, page["id"]),
+            )
+            # Enqueue a rebuild job (skip if one is already pending)
+            existing_job = conn.execute(
+                "SELECT id FROM job_queue WHERE target_id = ? AND job_type = 'rewiki' AND status = 'pending'",
+                (page["slug"],),
+            ).fetchone()
+            if not existing_job:
+                conn.execute(
+                    """INSERT INTO job_queue (id, job_type, target_id, status, reason, created_at, updated_at)
+                       VALUES (?, 'rewiki', ?, 'pending', ?, ?, ?)""",
+                    (str(uuid.uuid4()), page["slug"], f"document {doc_id} re-parsed", now, now),
+                )
+            dirty_count += 1
+
+    if dirty_count:
+        conn.commit()
+        print(f"[parse] Marked {dirty_count} wiki page(s) as dirty")
+
+
+# ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
 
@@ -326,6 +363,10 @@ def main():
 
         insert_fragments(conn, doc_id, fragments)
         set_status(conn, doc_id, "processed")
+
+        # Phase 8 — mark wiki pages referencing this document as dirty
+        mark_dirty_pages(conn, doc_id)
+
         print(f"[parse] Done — document {doc_id} status: processed")
 
     except Exception as exc:

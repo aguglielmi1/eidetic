@@ -9,6 +9,7 @@ interface WikiPage {
   page_type: "vendor" | "doc" | "presentation" | "data";
   title: string;
   source_doc_ids: string[];
+  dirty: number;
   created_at: number;
   updated_at: number;
 }
@@ -113,6 +114,11 @@ export default function WikiIndexPage() {
                         : ""}
                     </p>
                   </div>
+                  {page.dirty === 1 && (
+                    <span className="text-xs px-2 py-0.5 rounded-full font-medium shrink-0 bg-amber-900/50 text-amber-300">
+                      Out of date
+                    </span>
+                  )}
                   <span className={`text-xs px-2 py-0.5 rounded-full font-medium shrink-0 ${meta.classes}`}>
                     {meta.label}
                   </span>

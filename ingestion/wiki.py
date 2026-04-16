@@ -3,7 +3,12 @@
 Eidetic wiki generator.
 
 Usage:
-    python wiki.py <doc_id|all> <db_path> [wiki_path] [ollama_url]
+    python wiki.py <doc_id|all|dirty> <db_path> [wiki_path] [ollama_url]
+
+Modes:
+    <doc_id>  -- generate wiki for a single document
+    all       -- regenerate wiki for all processed documents
+    dirty     -- rebuild only wiki pages marked dirty (Phase 8 incremental rebuild)
 
 Environment variables:
     OLLAMA_URL    Override Ollama base URL (default: http://localhost:11434)
@@ -392,13 +397,95 @@ def process_document(doc_id: str, conn: sqlite3.Connection,
 
 
 # ---------------------------------------------------------------------------
+# Phase 8 — incremental rebuild of dirty wiki pages
+# ---------------------------------------------------------------------------
+
+def rebuild_dirty_pages(conn: sqlite3.Connection, wiki_path: Path,
+                        ollama_url: str, model: str):
+    """Find all dirty wiki pages and rebuild them from their source documents."""
+    dirty_pages = conn.execute(
+        "SELECT id, slug, page_type, source_doc_ids FROM wiki_pages WHERE dirty = 1"
+    ).fetchall()
+
+    if not dirty_pages:
+        print("[wiki] No dirty pages to rebuild")
+        return
+
+    print(f"[wiki] Rebuilding {len(dirty_pages)} dirty page(s)")
+    now = int(datetime.now().timestamp() * 1000)
+
+    for page in dirty_pages:
+        slug = page["slug"]
+        page_type = page["page_type"]
+        source_ids = json.loads(page["source_doc_ids"] or "[]")
+
+        # Mark any pending job_queue entries as running
+        conn.execute(
+            "UPDATE job_queue SET status = 'running', updated_at = ? WHERE target_id = ? AND job_type = 'rewiki' AND status = 'pending'",
+            (now, slug),
+        )
+        conn.commit()
+
+        try:
+            # Gather source documents that still exist
+            valid_doc_ids = []
+            for doc_id in source_ids:
+                doc = conn.execute(
+                    "SELECT id, status FROM documents WHERE id = ? AND status = 'processed'",
+                    (doc_id,),
+                ).fetchone()
+                if doc:
+                    valid_doc_ids.append(doc_id)
+
+            if not valid_doc_ids:
+                # All source docs are gone — remove the wiki page
+                print(f"[wiki] Removing orphaned page: {slug}")
+                file_path_row = conn.execute(
+                    "SELECT file_path FROM wiki_pages WHERE slug = ?", (slug,)
+                ).fetchone()
+                if file_path_row and Path(file_path_row["file_path"]).exists():
+                    Path(file_path_row["file_path"]).unlink()
+                conn.execute("DELETE FROM wiki_pages WHERE slug = ?", (slug,))
+                conn.execute(
+                    "UPDATE job_queue SET status = 'completed', updated_at = ? WHERE target_id = ? AND job_type = 'rewiki' AND status = 'running'",
+                    (now, slug),
+                )
+                conn.commit()
+                continue
+
+            # Rebuild by re-processing the first source document
+            # (for vendor pages, process_document aggregates all docs with the same vendor)
+            print(f"[wiki] Rebuilding: {slug} (type={page_type}, sources={len(valid_doc_ids)})")
+            process_document(valid_doc_ids[0], conn, wiki_path, ollama_url, model)
+
+            # Mark jobs as completed
+            conn.execute(
+                "UPDATE job_queue SET status = 'completed', updated_at = ? WHERE target_id = ? AND job_type = 'rewiki' AND status = 'running'",
+                (int(datetime.now().timestamp() * 1000), slug),
+            )
+            conn.commit()
+
+        except Exception as exc:
+            error_msg = str(exc)
+            print(f"[wiki] ERROR rebuilding {slug}: {error_msg}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            conn.execute(
+                "UPDATE job_queue SET status = 'failed', error = ?, updated_at = ? WHERE target_id = ? AND job_type = 'rewiki' AND status = 'running'",
+                (error_msg[:2000], int(datetime.now().timestamp() * 1000), slug),
+            )
+            conn.commit()
+
+    print("[wiki] Dirty rebuild complete")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
     if len(sys.argv) < 3:
         print(
-            f"Usage: {sys.argv[0]} <doc_id|all> <db_path> [wiki_path] [ollama_url]",
+            f"Usage: {sys.argv[0]} <doc_id|all|dirty> <db_path> [wiki_path] [ollama_url]",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -414,17 +501,18 @@ def main():
     conn = get_db(db_path)
 
     try:
-        if doc_id_or_all == "all":
+        if doc_id_or_all == "dirty":
+            rebuild_dirty_pages(conn, wiki_path, ollama_url, model)
+        elif doc_id_or_all == "all":
             docs = conn.execute(
                 "SELECT id FROM documents WHERE status = 'processed'"
             ).fetchall()
             doc_ids = [d["id"] for d in docs]
             print(f"[wiki] Processing {len(doc_ids)} document(s)")
+            for doc_id in doc_ids:
+                process_document(doc_id, conn, wiki_path, ollama_url, model)
         else:
-            doc_ids = [doc_id_or_all]
-
-        for doc_id in doc_ids:
-            process_document(doc_id, conn, wiki_path, ollama_url, model)
+            process_document(doc_id_or_all, conn, wiki_path, ollama_url, model)
 
         print("[wiki] Done")
 

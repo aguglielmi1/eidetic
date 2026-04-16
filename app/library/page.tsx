@@ -70,26 +70,39 @@ export default function LibraryPage() {
   const [parsing, setParsing] = useState<Set<string>>(new Set());
   const [embedding, setEmbedding] = useState<Set<string>>(new Set());
   const [wikifying, setWikifying] = useState<Set<string>>(new Set());
+  const [dirtyCount, setDirtyCount] = useState(0);
+  const [rebuilding, setRebuilding] = useState(false);
 
   const load = useCallback(async () => {
-    const res = await fetch("/api/documents");
-    if (res.ok) setDocs(await res.json());
+    const [docsRes, dirtyRes] = await Promise.all([
+      fetch("/api/documents"),
+      fetch("/api/wiki/rebuild-dirty"),
+    ]);
+    if (docsRes.ok) setDocs(await docsRes.json());
+    if (dirtyRes.ok) {
+      const data = await dirtyRes.json();
+      setDirtyCount(data.dirty_count);
+      if (data.dirty_count === 0) setRebuilding(false);
+    }
     setLoading(false);
   }, []);
 
   useEffect(() => {
     load();
-    // Poll while any doc is processing or embedding
+    // Poll while any doc is processing, embedding, or dirty rebuild is running
     const interval = setInterval(() => {
-      if (docs.some((d) =>
-        d.status === "processing" || d.status === "queued" ||
-        d.embed_status === "embedding" || d.wiki_status === "generating"
-      )) {
+      if (
+        rebuilding ||
+        docs.some((d) =>
+          d.status === "processing" || d.status === "queued" ||
+          d.embed_status === "embedding" || d.wiki_status === "generating"
+        )
+      ) {
         load();
       }
     }, 3000);
     return () => clearInterval(interval);
-  }, [load, docs]);
+  }, [load, docs, rebuilding]);
 
   const parse = async (doc: Document) => {
     setParsing((s) => new Set(s).add(doc.id));
@@ -119,6 +132,12 @@ export default function LibraryPage() {
     setDocs((prev) =>
       prev.map((d) => (d.id === doc.id ? { ...d, wiki_status: "generating" } : d))
     );
+    load();
+  };
+
+  const rebuildDirty = async () => {
+    setRebuilding(true);
+    await fetch("/api/wiki/rebuild-dirty", { method: "POST" });
     load();
   };
 
@@ -168,6 +187,21 @@ export default function LibraryPage() {
           + Upload
         </button>
       </div>
+
+      {dirtyCount > 0 && (
+        <div className="flex items-center gap-3 rounded-xl bg-amber-900/20 border border-amber-800/40 px-4 py-3">
+          <span className="text-amber-400 text-sm font-medium">
+            {dirtyCount} wiki page{dirtyCount !== 1 ? "s" : ""} out of date
+          </span>
+          <button
+            onClick={rebuildDirty}
+            disabled={rebuilding}
+            className="ml-auto text-xs px-3 py-1.5 rounded-lg bg-amber-700/50 hover:bg-amber-700/80 text-amber-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            {rebuilding ? "Rebuilding…" : "Rebuild Dirty Pages"}
+          </button>
+        </div>
+      )}
 
       <ul className="flex flex-col gap-3">
         {docs.map((doc) => {
@@ -238,7 +272,7 @@ export default function LibraryPage() {
                 </p>
               )}
 
-              <div className="flex gap-2 pl-9">
+              <div className="flex flex-wrap gap-2 pl-9">
                 {(doc.status === "queued" || doc.status === "failed") && (
                   <button
                     onClick={() => parse(doc)}
