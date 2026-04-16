@@ -280,7 +280,7 @@ export default function ChatView({
       </div>
 
       {/* Input area */}
-      <div className="border-t border-zinc-800 px-4 py-3">
+      <div className="safe-bottom border-t border-zinc-800 px-4 py-3">
         <div className="flex items-end gap-2 max-w-3xl mx-auto">
           <textarea
             ref={textareaRef}

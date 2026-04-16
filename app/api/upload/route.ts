@@ -1,4 +1,4 @@
-import { randomUUID } from "crypto";
+import { randomUUID, createHash } from "crypto";
 import fs from "fs";
 import path from "path";
 import db from "@/lib/db";
@@ -45,14 +45,28 @@ export async function POST(request: Request) {
 
   const filePath = path.join(docDir, originalName);
   const bytes = await file.arrayBuffer();
-  fs.writeFileSync(filePath, Buffer.from(bytes));
+  const buf = Buffer.from(bytes);
+  fs.writeFileSync(filePath, buf);
+
+  // Phase 8 — compute SHA-256 content hash for change detection
+  const contentHash = createHash("sha256").update(buf).digest("hex");
 
   const now = Date.now();
   db.prepare(
-    `INSERT INTO documents (id, original_name, file_type, status, file_path, file_size, created_at, updated_at)
-     VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)`
-  ).run(docId, originalName, fileType, filePath, file.size, now, now);
+    `INSERT INTO documents (id, original_name, file_type, status, file_path, file_size, content_hash, created_at, updated_at)
+     VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?)`
+  ).run(docId, originalName, fileType, filePath, file.size, contentHash, now, now);
+
+  // Check if a previous version of this file exists (same name, different hash)
+  const previous = db.prepare(
+    `SELECT id, content_hash FROM documents
+     WHERE original_name = ? AND id != ? AND content_hash IS NOT NULL
+     ORDER BY created_at DESC LIMIT 1`
+  ).get(originalName, docId) as { id: string; content_hash: string } | undefined;
 
   const doc = db.prepare(`SELECT * FROM documents WHERE id = ?`).get(docId);
-  return Response.json(doc, { status: 201 });
+  return Response.json(
+    { ...doc as Record<string, unknown>, duplicate: previous ? previous.content_hash === contentHash : false },
+    { status: 201 }
+  );
 }

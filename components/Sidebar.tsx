@@ -74,7 +74,7 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
         `}
       >
         {/* Logo */}
-        <div className="flex items-center gap-2 px-4 py-4 border-b border-zinc-700">
+        <div className="safe-top flex items-center gap-2 px-4 py-4 border-b border-zinc-700">
           <span className="text-lg font-semibold tracking-tight">eidetic</span>
         </div>
 

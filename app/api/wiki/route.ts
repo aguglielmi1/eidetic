@@ -3,7 +3,7 @@ import db from "@/lib/db";
 export async function GET() {
   const pages = db
     .prepare(
-      `SELECT id, slug, page_type, title, source_doc_ids, created_at, updated_at
+      `SELECT id, slug, page_type, title, source_doc_ids, dirty, created_at, updated_at
        FROM wiki_pages
        ORDER BY updated_at DESC`
     )
@@ -13,6 +13,7 @@ export async function GET() {
       page_type: string;
       title: string;
       source_doc_ids: string;
+      dirty: number;
       created_at: number;
       updated_at: number;
     }[];

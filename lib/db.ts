@@ -106,8 +106,29 @@ for (const stmt of [
   "ALTER TABLE documents ADD COLUMN wiki_status TEXT",
   "ALTER TABLE documents ADD COLUMN wiki_error TEXT",
   "ALTER TABLE documents ADD COLUMN wiki_page_slug TEXT",
+  "ALTER TABLE documents ADD COLUMN content_hash TEXT",
 ]) {
   try { db.exec(stmt); } catch { /* already exists */ }
 }
+
+// Phase 8 — job queue for tracking pending reprocessing work
+db.exec(`
+  CREATE TABLE IF NOT EXISTS job_queue (
+    id         TEXT PRIMARY KEY,
+    job_type   TEXT NOT NULL,
+    target_id  TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'pending',
+    reason     TEXT,
+    error      TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_job_queue_status
+    ON job_queue(status, job_type);
+
+  CREATE INDEX IF NOT EXISTS idx_job_queue_target
+    ON job_queue(target_id);
+`);
 
 export default db;
