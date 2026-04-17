@@ -132,4 +132,12 @@ db.exec(`
     ON job_queue(target_id);
 `);
 
+// App settings (password hash, preferences, etc.)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+`);
+
 export default db;
