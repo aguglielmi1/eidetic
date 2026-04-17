@@ -146,7 +146,7 @@ export default function SettingsPage() {
                 — just open the URL on your phone and sign in.
               </p>
               <p className="mt-2 text-xs text-zinc-600">
-                Change your password by updating EIDETIC_PASSWORD in .env.local and restarting.
+                Change your password from the Authentication section below.
               </p>
             </>
           ) : (
@@ -201,8 +201,8 @@ export default function SettingsPage() {
             </div>
           </div>
           <p className="mt-3 text-xs text-zinc-600">
-            All pages and API routes are protected. Change your password by updating
-            EIDETIC_PASSWORD in .env.local.
+            All pages and API routes are protected. Password is stored securely
+            in the database.
           </p>
         </div>
       </section>
