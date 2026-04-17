@@ -1112,6 +1112,130 @@ Clone repo → run one script → open browser → set password → using eideti
 
 Build verified clean.
 
+Step 37. Installer resilience and Windows compatibility ✅
+
+The initial install.ps1 closed its window immediately on error when launched
+via right-click → Run with PowerShell, making failures invisible. Several
+Windows-specific incompatibilities also surfaced. All fixed:
+
+Error visibility:
+  - Wrapped the full script in try / catch / finally.
+  - catch prints a red "Installation failed" banner with the exception message
+    and InvocationInfo.PositionMessage (file + line + code fragment).
+  - finally calls Pause-Before-Exit which waits for Enter before closing,
+    so the window stays open whether install succeeds or fails.
+  - Initialize $script:installFailed = $false before the try block so strict
+    mode does not trip on the finally-block check when install succeeds.
+
+Working directory:
+  - Set-Location -Path $PSScriptRoot at the top of the try block.
+  - Script now works regardless of where it was launched from (e.g. from
+    C:\Users\<name> when invoked via an absolute path).
+  - Fixes "npm error enoent ... package.json" when the caller's CWD
+    wasn't the repo folder.
+
+npm wrapper bug:
+  - Node ships npm.ps1 which reads $MyInvocation.Statement; under
+    Set-StrictMode -Version Latest this throws "The property 'Statement'
+    cannot be found on this object".
+  - Fix: call npm.cmd install and npm.cmd run build (the CMD shim,
+    not the PowerShell wrapper). Avoids both the strict-mode bug and
+    the default Windows execution policy blocking .ps1 scripts.
+
+PowerShell 5.1 crypto compatibility:
+  - [System.Security.Cryptography.RandomNumberGenerator]::Fill() is .NET Core
+    only (PowerShell 7+). Fails on stock Windows PowerShell 5.1.
+  - Fix: use ::Create().GetBytes($bytes) wrapped in try/finally with Dispose().
+    Works on both Windows PowerShell 5.1 and PowerShell 7+.
+
+Deliverable:
+
+Installer runs reliably on a fresh Windows box, shows the real reason on
+failure, and keeps the window open so the user can read it.
+
+Step 38. Auto-start prompt after install ✅
+
+The final instruction "run npm start" failed on fresh Windows because the
+default execution policy blocks npm.ps1 for unsigned scripts. Solved by
+offering to start the app directly.
+
+At the end of a successful install:
+  - Prints "Start eidetic now? [Y/n]"
+  - If yes (default), runs npm.cmd start in-place — server starts
+    immediately, user can open http://localhost:3000 and set their password.
+  - If no, prints a reminder to run "npm.cmd start" from the repo folder
+    (with a note explaining why npm.cmd, not npm).
+
+Deliverable:
+
+Zero-gap path from "run install.ps1" to "type password into browser" —
+no second terminal command to memorize.
+
+Step 39. Tailscale Funnel setup baked into install.ps1 ✅
+
+Extended the installer with an opt-in step that installs Tailscale,
+signs it in, enables Funnel on port 3000, and surfaces the public URL
+so it's findable by anyone running the script.
+
+Pre-flight information (printed before the prompt):
+  - Explains what Funnel does (public HTTPS URL, no client-side Tailscale).
+  - Lists the two tailnet prerequisites with admin-panel URLs:
+      1. HTTPS Certificates enabled (login.tailscale.com/admin/dns)
+      2. Funnel granted via nodeAttrs ACL (login.tailscale.com/admin/acls)
+    Shows the exact JSON snippet to paste:
+      "nodeAttrs": [ { "target": ["*"], "attr": ["funnel"] } ]
+  - Assures the user failures will be explained clearly.
+
+Tailscale CLI discovery:
+  - First try Get-Command tailscale.
+  - Fallback to C:\Program Files\Tailscale\tailscale.exe (winget doesn't
+    refresh PATH for the running shell).
+  - If neither exists, install via:
+      winget install --id Tailscale.Tailscale -e
+        --accept-package-agreements --accept-source-agreements
+  - Sleep 3s after install to let the Tailscale service finish coming up.
+
+Login:
+  - tailscale status --json is parsed; BackendState == "Running" means
+    already logged in (skip login).
+  - Otherwise runs "tailscale up" which opens a browser for device approval.
+
+Funnel activation:
+  - tailscale funnel --bg 3000 — persists across reboots via Tailscale's
+    own state store (Windows service restores on startup).
+  - Output captured with 2>&1 | Out-String; if $LASTEXITCODE != 0,
+    the raw output is scanned for phrases to produce targeted errors:
+      * "https" + "disabled/not enabled/must be enabled"
+        → HTTPS Certificates not enabled on tailnet (points to /admin/dns)
+      * "funnel" + "not available/not permitted/nodeattr/acl/access denied"
+        → Funnel attr not granted in ACLs (points to /admin/acls with snippet)
+      * otherwise → generic message listing all three common causes
+  - Exits cleanly via throw so the catch block prints the banner and the
+    window pauses for the user to read.
+
+URL capture and display:
+  - DNS name read from Self.DNSName in "tailscale status --json"
+    (e.g. aguglielmi.tail671088.ts.net.), trailing dot stripped.
+  - Public URL is https://<dnsName>.
+  - Written to public-url.txt in the repo root (added to .gitignore as
+    /public-url.txt under "per-install artifacts").
+  - Printed prominently in green inside the final "Setup complete!" banner,
+    with a note that it's also saved to public-url.txt.
+
+Final message ordering:
+  - If publicUrl is set: public URL shown first, then local URL.
+  - Otherwise: only local URL is shown (user declined Funnel).
+  - npm.cmd start instruction retained for later manual starts.
+
+Deliverable:
+
+Installer produces a copy-paste-ready https://<host>.<tailnet>.ts.net URL
+that any device on the internet can open — no Tailscale client, no VPN,
+no port forwarding. Phone opens the URL, hits the login page, sets a
+password, and the system is usable.
+
+Build verified clean.
+
 Recommended tools by layer
 App layer
 Next.js

@@ -50,3 +50,6 @@ next-env.d.ts
 /storage/*.db
 /storage/*.db-shm
 /storage/*.db-wal
+
+# per-install artifacts
+/public-url.txt
