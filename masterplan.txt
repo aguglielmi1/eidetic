@@ -1236,6 +1236,118 @@ password, and the system is usable.
 
 Build verified clean.
 
+Phase 13 — Incremental-update launcher and Next.js tracing fix ✅ COMPLETE
+═══════════════════════════════════════════════════════════════════════
+
+Goal: Install is a one-shot; starting the app every day needs a lighter
+script that fetches updates, keeps dependencies in sync, and surfaces the
+public URL — without re-running the entire install flow. Phase 13 builds
+that launcher and fixes a stray multi-lockfile warning along the way.
+
+Step 40. Incremental launch script ✅
+
+launch.ps1 complements install.ps1. Run it after cloning/installing once;
+it pulls changes and only re-syncs what actually moved:
+
+1. Pull updates
+   - git status --porcelain first: if the tree is dirty, skip the pull
+     and print the dirty list (never stomp on in-progress work).
+   - Otherwise git fetch + compare HEAD to @{u}. If ahead, git pull --ff-only.
+   - Before pulling, hash package.json, package-lock.json, and
+     ingestion/requirements.txt. After pulling, re-hash and record which
+     files changed — used to drive the next steps.
+
+2. Node dependencies
+   - npm.cmd install only if node_modules is missing OR the manifest
+     changed during pull. Otherwise skip with "node_modules in sync
+     with lockfile".
+
+3. npm audit
+   - npm.cmd audit --json, parsed for metadata.vulnerabilities.total.
+   - If zero → skip. If >0 → npm.cmd audit fix. If parse fails → run
+     audit fix anyway (defensive).
+
+4. Python dependencies
+   - pip install -r ingestion/requirements.txt only when that file
+     actually changed during pull.
+
+5. Build
+   - npm.cmd run build only if updates were pulled OR .next is missing.
+   - Otherwise skip with ".next is current".
+
+6. Start
+   - Prints local + public URL banner, then npm.cmd start (blocks).
+
+Error handling mirrors install.ps1: try / catch / finally with a
+Pause-Before-Exit handler so the window stays open on failure.
+
+Step 41. Launcher window-visibility fix ✅
+
+launch.ps1 closed its PowerShell window too fast to read when launched
+via right-click → Run with PowerShell. Two root causes, two fixes:
+
+PowerShell 5.1 parse errors from Unicode in comments:
+  - The script used box-drawing ── and em-dash — in section comments.
+  - Windows PowerShell 5.1 reads UTF-8 files without a BOM as Windows-1252;
+    the multi-byte UTF-8 sequences decoded to characters that tripped the
+    parser with cascading "Missing terminator" / "Missing catch or finally"
+    errors — all stemming from a single mangled byte.
+  - Fix: replaced every ── and — in launch.ps1 with ASCII (---, -).
+    Script now parses identically regardless of how PS reads encoding.
+
+launch.cmd wrapper:
+  - Small .cmd shim that invokes
+      powershell.exe -NoProfile -ExecutionPolicy Bypass -File launch.ps1
+    and runs `pause` unconditionally at the end.
+  - Keeps the window open even when launch.ps1 fails before its own
+    Pause-Before-Exit runs (e.g. execution-policy rejection, or the parse
+    errors above).
+  - Users should double-click launch.cmd, not launch.ps1.
+
+Step 42. Tailscale Funnel verification at launch ✅
+
+install.ps1 enables Funnel with `tailscale funnel --bg 3000` so it
+persists across reboots via Tailscaled's own state store. launch.ps1
+doesn't re-enable it, but it does verify the state before printing the
+public URL:
+
+  - Locate tailscale.exe (PATH or C:\Program Files\Tailscale\tailscale.exe).
+  - Parse Self.DNSName from `tailscale status --json`.
+  - Run `tailscale funnel status` and check if port 3000 appears in output.
+  - If active: construct https://<dnsName>, refresh public-url.txt, print
+    "Funnel active on port 3000", show URL in green in the start banner.
+  - If cached URL exists but funnel is off: show it in yellow tagged
+    "(funnel currently OFF)" so stale URLs aren't mistaken for live ones.
+  - If Tailscale not installed: warn LAN-only and skip the check.
+
+Remediation hint is the exact command to paste:
+  tailscale funnel --bg 3000   (or re-run install.ps1)
+
+Step 43. Silence Next.js multi-lockfile warning ✅
+
+next start emitted:
+
+  Warning: Next.js inferred your workspace root, but it may not be correct.
+  We detected multiple lockfiles and selected the directory of
+  C:\Users\gugli\package-lock.json as the root directory.
+
+A stray package-lock.json in the user's home directory was being picked
+as the tracing root instead of the project. Fixed in next.config.ts by
+pinning outputFileTracingRoot to the project directory:
+
+  import path from "node:path";
+  outputFileTracingRoot: path.resolve(__dirname),
+
+Project uses CommonJS (no "type": "module" in package.json), so __dirname
+is available in next.config.ts without extra shims.
+
+Deliverable:
+
+Day-to-day usage is a single double-click on launch.cmd. It pulls, syncs
+only what changed, verifies the Funnel is live, refreshes the public URL,
+and starts the server. Window stays open on failure so you can actually
+read the error.
+
 Recommended tools by layer
 App layer
 Next.js
