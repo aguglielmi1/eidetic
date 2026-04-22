@@ -12,6 +12,10 @@ for (const sub of ["", "raw", "processed", "failed", "wiki", "chroma"]) {
 
 const db = new Database(DB_PATH);
 
+// Concurrent `next build` workers all import this module and run the
+// idempotent schema setup below. Without a busy timeout they race for
+// the write lock and one loses with SQLITE_BUSY.
+db.pragma("busy_timeout = 10000");
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
 
