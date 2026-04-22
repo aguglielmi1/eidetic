@@ -1200,7 +1200,7 @@ Login:
     already logged in (skip login).
   - Otherwise runs "tailscale up" which opens a browser for device approval.
 
-Funnel activation:
+Funnel activation:I get
   - tailscale funnel --bg 3000 — persists across reboots via Tailscale's
     own state store (Windows service restores on startup).
   - Output captured with 2>&1 | Out-String; if $LASTEXITCODE != 0,
@@ -1358,6 +1358,24 @@ install.cmd at the repo root:
 
 Users double-click install.cmd, not install.ps1. The wrapper runs `pause`
 unconditionally at the end, so the window stays open on any failure path.
+
+Step 45. install.ps1 Unicode parse-error fix ✅
+
+Same root cause as Step 41's launch.ps1 fix. install.ps1 used box-drawing
+characters (U+2500 `-`) in section-divider comments and em-dashes
+(U+2014 `-`) inline for prose. Windows PowerShell 5.1 reads UTF-8 files
+without a BOM as Windows-1252, so the multi-byte UTF-8 sequences decoded
+to garbage bytes that tripped the parser. The symptom was a misleading
+"missing closing '(' in an expression" error pointing at an unrelated line.
+
+Fix: replaced every `-` and `-` in install.ps1 with ASCII `-`. Verified
+the file is pure ASCII (grep for bytes outside 0x00-0x7F returns zero
+matches) and that [System.Management.Automation.Language.Parser]::ParseFile
+completes without errors under Windows PowerShell.
+
+Same class of bug, same remediation as launch.ps1. From now on, any
+script that ships in the repo must stay ASCII-only in source form -
+comments included - so PS 5.1's encoding quirk can't break it.
 
 Deliverable:
 

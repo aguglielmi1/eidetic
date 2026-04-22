@@ -1,4 +1,4 @@
-# install.ps1 — one-shot setup for eidetic on Windows
+# install.ps1 - one-shot setup for eidetic on Windows
 # Usage: right-click > Run with PowerShell, or: powershell -ExecutionPolicy Bypass -File install.ps1
 
 Set-StrictMode -Version Latest
@@ -27,7 +27,7 @@ Write-Host "  =================" -ForegroundColor DarkGray
 Write-Host "  (working in: $PSScriptRoot)" -ForegroundColor DarkGray
 Write-Host ""
 
-# ── 1. Check prerequisites ──────────────────────────────────────────
+# -- 1. Check prerequisites ------------------------------------------
 
 Write-Step "Checking prerequisites"
 
@@ -64,21 +64,21 @@ try {
     throw "Ollama missing"
 }
 
-# ── 2. Install Node dependencies ────────────────────────────────────
+# -- 2. Install Node dependencies ------------------------------------
 
 Write-Step "Installing Node dependencies"
 npm.cmd install
 if ($LASTEXITCODE -ne 0) { Write-Err "npm install failed"; throw "npm install failed" }
 Write-Ok "Done"
 
-# ── 3. Install Python dependencies ──────────────────────────────────
+# -- 3. Install Python dependencies ----------------------------------
 
 Write-Step "Installing Python dependencies"
 & $python -m pip install -r ingestion/requirements.txt
 if ($LASTEXITCODE -ne 0) { Write-Err "pip install failed"; throw "pip install failed" }
 Write-Ok "Done"
 
-# ── 4. Choose Ollama model based on VRAM ────────────────────────────
+# -- 4. Choose Ollama model based on VRAM ----------------------------
 
 Write-Step "Choosing LLM model"
 Write-Host ""
@@ -101,7 +101,7 @@ switch ($choice) {
 
 Write-Ok "Selected: $label"
 
-# ── 5. Pull models ──────────────────────────────────────────────────
+# -- 5. Pull models --------------------------------------------------
 
 Write-Step "Pulling $model (this may take a while)"
 ollama pull $model
@@ -113,7 +113,7 @@ ollama pull nomic-embed-text
 if ($LASTEXITCODE -ne 0) { Write-Err "Failed to pull nomic-embed-text"; throw "ollama pull nomic-embed-text failed" }
 Write-Ok "nomic-embed-text ready"
 
-# ── 6. Generate secrets & write .env.local ──────────────────────────
+# -- 6. Generate secrets & write .env.local --------------------------
 
 Write-Step "Generating configuration"
 
@@ -134,20 +134,20 @@ OLLAMA_MODEL=$model
 Set-Content -Path $envFile -Value $envContent -Encoding UTF8
 Write-Ok ".env.local written"
 
-# ── 7. Build ────────────────────────────────────────────────────────
+# -- 7. Build --------------------------------------------------------
 
 Write-Step "Building eidetic (production)"
 npm.cmd run build
 if ($LASTEXITCODE -ne 0) { Write-Err "Build failed"; throw "npm run build failed" }
 Write-Ok "Build complete"
 
-# ── 8. Tailscale Funnel (remote HTTPS access) ───────────────────────
+# -- 8. Tailscale Funnel (remote HTTPS access) -----------------------
 
 Write-Step "Setting up Tailscale Funnel (remote HTTPS access)"
 
 Write-Host ""
 Write-Host "   Funnel exposes this machine at https://<host>.<tailnet>.ts.net" -ForegroundColor White
-Write-Host "   so anyone with the URL can reach it — no Tailscale needed on the" -ForegroundColor White
+Write-Host "   so anyone with the URL can reach it - no Tailscale needed on the" -ForegroundColor White
 Write-Host "   client. Before continuing, make sure your tailnet is set up for it:" -ForegroundColor White
 Write-Host ""
 Write-Host "   1. HTTPS Certificates: must be ENABLED" -ForegroundColor White
@@ -160,7 +160,7 @@ Write-Host "        `"nodeAttrs`": [" -ForegroundColor DarkGray
 Write-Host "          { `"target`": [`"*`"], `"attr`": [`"funnel`"] }" -ForegroundColor DarkGray
 Write-Host "        ]" -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "   Without these, the funnel step will fail (cleanly — we'll tell" -ForegroundColor White
+Write-Host "   Without these, the funnel step will fail (cleanly - we'll tell" -ForegroundColor White
 Write-Host "   you exactly what's wrong and you can re-run this script)." -ForegroundColor White
 Write-Host ""
 
@@ -168,7 +168,7 @@ $publicUrl = $null
 $wantsFunnel = Read-Host "   Enable remote HTTPS access via Tailscale Funnel? [Y/n]"
 
 if ($wantsFunnel -ne "" -and $wantsFunnel -notmatch "^[Yy]") {
-    Write-Warn "Skipped Tailscale setup — app will only be reachable on your LAN"
+    Write-Warn "Skipped Tailscale setup - app will only be reachable on your LAN"
 } else {
     # Locate tailscale.exe (install if missing)
     $tsExe = $null
@@ -179,7 +179,7 @@ if ($wantsFunnel -ne "" -and $wantsFunnel -notmatch "^[Yy]") {
     }
 
     if (-not $tsExe) {
-        Write-Host "   Tailscale not found — installing via winget..." -ForegroundColor White
+        Write-Host "   Tailscale not found - installing via winget..." -ForegroundColor White
         winget install --id Tailscale.Tailscale -e --accept-package-agreements --accept-source-agreements
         if ($LASTEXITCODE -ne 0) {
             Write-Err "winget install failed. Install manually from https://tailscale.com/download/windows and re-run this script."
@@ -210,7 +210,7 @@ if ($wantsFunnel -ne "" -and $wantsFunnel -notmatch "^[Yy]") {
 
     if ($backendState -ne "Running") {
         Write-Host ""
-        Write-Host "   Logging in to Tailscale — a browser window will open." -ForegroundColor White
+        Write-Host "   Logging in to Tailscale - a browser window will open." -ForegroundColor White
         Write-Host "   Complete the login, then return here." -ForegroundColor White
         Write-Host ""
         & $tsExe up
@@ -259,7 +259,7 @@ if ($wantsFunnel -ne "" -and $wantsFunnel -notmatch "^[Yy]") {
     Write-Ok "Saved public URL to public-url.txt"
 }
 
-# ── Done ────────────────────────────────────────────────────────────
+# -- Done ------------------------------------------------------------
 
 Write-Host ""
 Write-Host "  ==============================================" -ForegroundColor DarkGray
@@ -279,7 +279,7 @@ Write-Host "  You'll be asked to set a password on first visit." -ForegroundColo
 Write-Host ""
 Write-Host "  To start eidetic later, run this from the repo folder:" -ForegroundColor White
 Write-Host "    npm.cmd start" -ForegroundColor Yellow
-Write-Host "  (use npm.cmd, not npm — PowerShell's execution policy" -ForegroundColor DarkGray
+Write-Host "  (use npm.cmd, not npm - PowerShell's execution policy" -ForegroundColor DarkGray
 Write-Host "   blocks the npm.ps1 wrapper by default)" -ForegroundColor DarkGray
 Write-Host "  ==============================================" -ForegroundColor DarkGray
 Write-Host ""
