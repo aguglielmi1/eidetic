@@ -31,37 +31,86 @@ Write-Host ""
 
 Write-Step "Checking prerequisites"
 
-# Node.js
+# Node.js (must be installed by the user - we don't auto-install this one)
 try {
     $nodeVersion = (node --version 2>&1).ToString().Trim()
     Write-Ok "Node.js $nodeVersion"
 } catch {
-    Write-Err "Node.js not found. Install it from https://nodejs.org"
+    Write-Err "Node.js not found. Install it from https://nodejs.org and re-run this script."
     throw "Node.js missing"
 }
 
-# Python
-$python = $null
-foreach ($cmd in "python", "python3") {
-    try {
-        $pyVer = (& $cmd --version 2>&1).ToString().Trim()
-        $python = $cmd
-        Write-Ok "$pyVer ($cmd)"
-        break
-    } catch {}
+function Update-SessionPath {
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path = "$machinePath;$userPath"
 }
-if (-not $python) {
-    Write-Err "Python not found. Install it from https://python.org"
-    throw "Python missing"
+
+function Find-Python {
+    foreach ($cmd in "python", "python3") {
+        try {
+            $pyVer = (& $cmd --version 2>&1).ToString().Trim()
+            if ($pyVer -match "Python\s+\d") {
+                return [pscustomobject]@{ Cmd = $cmd; Version = $pyVer }
+            }
+        } catch {}
+    }
+    return $null
+}
+
+# Python
+$py = Find-Python
+if ($py) {
+    Write-Ok "$($py.Version) ($($py.Cmd))"
+    $python = $py.Cmd
+} else {
+    Write-Host "   Python not found - installing via winget..." -ForegroundColor White
+    winget install --id Python.Python.3.12 -e --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "winget install failed. Install Python manually from https://python.org and re-run this script."
+        throw "Python install failed"
+    }
+
+    Update-SessionPath
+    $py = Find-Python
+    if ($py) {
+        Write-Ok "$($py.Version) ($($py.Cmd))"
+        $python = $py.Cmd
+    } else {
+        Write-Err "Python installed but not on PATH in this session."
+        Write-Err "Close this window, open a new PowerShell, and re-run install.ps1."
+        throw "Python post-install missing"
+    }
 }
 
 # Ollama
+$ollamaOk = $false
 try {
-    $ollamaHelp = ollama --version 2>&1
+    $null = ollama --version 2>&1
     Write-Ok "Ollama found"
-} catch {
-    Write-Err "Ollama not found. Install it from https://ollama.com"
-    throw "Ollama missing"
+    $ollamaOk = $true
+} catch {}
+
+if (-not $ollamaOk) {
+    Write-Host "   Ollama not found - installing via winget..." -ForegroundColor White
+    winget install --id Ollama.Ollama -e --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "winget install failed. Install Ollama manually from https://ollama.com and re-run this script."
+        throw "Ollama install failed"
+    }
+
+    Update-SessionPath
+    # Ollama installs a background service - give it a moment to start
+    Start-Sleep -Seconds 3
+
+    try {
+        $null = ollama --version 2>&1
+        Write-Ok "Ollama found"
+    } catch {
+        Write-Err "Ollama installed but 'ollama' is not on PATH in this session."
+        Write-Err "Close this window, open a new PowerShell, and re-run install.ps1."
+        throw "Ollama post-install missing"
+    }
 }
 
 # -- 2. Install Node dependencies ------------------------------------
