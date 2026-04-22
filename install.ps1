@@ -15,6 +15,12 @@ function Pause-Before-Exit {
     try { [void](Read-Host) } catch {}
 }
 
+function Update-SessionPath {
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path = "$machinePath;$userPath"
+}
+
 $script:installFailed = $false
 
 try {
@@ -24,8 +30,59 @@ Set-Location -Path $PSScriptRoot
 Write-Host ""
 Write-Host "  eidetic installer" -ForegroundColor White
 Write-Host "  =================" -ForegroundColor DarkGray
-Write-Host "  (working in: $PSScriptRoot)" -ForegroundColor DarkGray
+Write-Host "  (script in: $PSScriptRoot)" -ForegroundColor DarkGray
 Write-Host ""
+
+# -- 0. Locate the eidetic repo --------------------------------------
+# If install.ps1 was run standalone (e.g. from a Downloads folder) there's
+# no package.json next to it. Install git if missing, clone the repo into
+# a subfolder, and continue from there.
+
+$repoRoot = $PSScriptRoot
+
+if (-not (Test-Path (Join-Path $repoRoot "package.json"))) {
+    Write-Step "Locating eidetic repo"
+
+    $repoUrl = "https://github.com/aguglielmi1/eidetic.git"
+    $cloneTarget = Join-Path $PSScriptRoot "eidetic"
+
+    if (Test-Path (Join-Path $cloneTarget "package.json")) {
+        Write-Ok "Using existing clone at $cloneTarget"
+        $repoRoot = $cloneTarget
+    } elseif (Test-Path $cloneTarget) {
+        Write-Err "Directory '$cloneTarget' exists but isn't a valid eidetic checkout."
+        Write-Err "Remove or rename it, then re-run this script."
+        throw "Clone target occupied"
+    } else {
+        $gitOk = $false
+        try { $null = git --version 2>&1; $gitOk = $true } catch {}
+
+        if (-not $gitOk) {
+            Write-Host "   Git not found - installing via winget..." -ForegroundColor White
+            winget install --id Git.Git -e --accept-package-agreements --accept-source-agreements
+            if ($LASTEXITCODE -ne 0) {
+                Write-Err "winget install failed. Install Git manually from https://git-scm.com and re-run this script."
+                throw "Git install failed"
+            }
+            Update-SessionPath
+            try { $null = git --version 2>&1 } catch {
+                Write-Err "Git installed but 'git' is not on PATH in this session."
+                Write-Err "Close this window, open a new PowerShell, and re-run install.ps1."
+                throw "Git post-install missing"
+            }
+        }
+
+        Write-Host "   Cloning $repoUrl" -ForegroundColor White
+        Write-Host "   into $cloneTarget ..." -ForegroundColor White
+        git clone $repoUrl $cloneTarget
+        if ($LASTEXITCODE -ne 0) { throw "git clone failed" }
+        Write-Ok "Cloned"
+        $repoRoot = $cloneTarget
+    }
+
+    Set-Location -Path $repoRoot
+    Write-Ok "Working in: $repoRoot"
+}
 
 # -- 1. Check prerequisites ------------------------------------------
 
@@ -38,12 +95,6 @@ try {
 } catch {
     Write-Err "Node.js not found. Install it from https://nodejs.org and re-run this script."
     throw "Node.js missing"
-}
-
-function Update-SessionPath {
-    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    $env:Path = "$machinePath;$userPath"
 }
 
 function Find-Python {
@@ -166,7 +217,7 @@ Write-Ok "nomic-embed-text ready"
 
 Write-Step "Generating configuration"
 
-$envFile = Join-Path $PSScriptRoot ".env.local"
+$envFile = Join-Path $repoRoot ".env.local"
 
 # Generate a random 32-byte hex secret
 $bytes = New-Object byte[] 32
@@ -304,7 +355,7 @@ if ($wantsFunnel -ne "" -and $wantsFunnel -notmatch "^[Yy]") {
     Write-Ok "Funnel active"
 
     # Save the URL so it's easy to find later
-    Set-Content -Path (Join-Path $PSScriptRoot "public-url.txt") -Value $publicUrl -Encoding UTF8
+    Set-Content -Path (Join-Path $repoRoot "public-url.txt") -Value $publicUrl -Encoding UTF8
     Write-Ok "Saved public URL to public-url.txt"
 }
 
@@ -326,6 +377,7 @@ if ($publicUrl) {
 Write-Host "  Local URL: http://localhost:3000" -ForegroundColor White
 Write-Host "  You'll be asked to set a password on first visit." -ForegroundColor White
 Write-Host ""
+Write-Host "  Repo folder: $repoRoot" -ForegroundColor White
 Write-Host "  To start eidetic later, run this from the repo folder:" -ForegroundColor White
 Write-Host "    npm.cmd start" -ForegroundColor Yellow
 Write-Host "  (use npm.cmd, not npm - PowerShell's execution policy" -ForegroundColor DarkGray
