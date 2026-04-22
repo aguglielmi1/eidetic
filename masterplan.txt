@@ -1341,12 +1341,31 @@ pinning outputFileTracingRoot to the project directory:
 Project uses CommonJS (no "type": "module" in package.json), so __dirname
 is available in next.config.ts without extra shims.
 
+Step 44. install.cmd wrapper for install.ps1 ✅
+
+Mirrors the launch.cmd pattern from Step 41 for the installer. Right-click
+→ Run with PowerShell on install.ps1 still closes the window too quickly
+to read errors if the script fails before its own Pause-Before-Exit
+handler runs (e.g. execution-policy rejection, early parse errors).
+
+install.cmd at the repo root:
+
+  @echo off
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1"
+  echo.
+  echo (installer exited - press any key to close this window)
+  pause >nul
+
+Users double-click install.cmd, not install.ps1. The wrapper runs `pause`
+unconditionally at the end, so the window stays open on any failure path.
+
 Deliverable:
 
 Day-to-day usage is a single double-click on launch.cmd. It pulls, syncs
 only what changed, verifies the Funnel is live, refreshes the public URL,
-and starts the server. Window stays open on failure so you can actually
-read the error.
+and starts the server. First-time setup is a single double-click on
+install.cmd. Window stays open on failure so you can actually read the
+error.
 
 Recommended tools by layer
 App layer
