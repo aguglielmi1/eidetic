@@ -271,23 +271,107 @@ if ($wantsStalwart -notmatch "^[Yy]") {
                 Start-Sleep -Seconds 2
             }
         } else {
-            Write-Host "   Installing Stalwart via winget..." -ForegroundColor White
-            winget install --id Stalwart.Mail -e --accept-package-agreements --accept-source-agreements
-            if ($LASTEXITCODE -ne 0) {
-                Write-Err "winget install failed. Winget may not have a manifest for Stalwart yet."
-                Write-Err "Install manually from https://stalw.art/download and re-run this script."
-                throw "Stalwart install failed"
+            # Admin is required for Program Files + sc.exe service registration
+            $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+            if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+                Write-Err "Stalwart install needs Administrator (for Program Files + service registration)."
+                Write-Err "Re-run install.ps1 from an elevated PowerShell, or skip Stalwart and install it manually."
+                throw "Stalwart install requires admin"
             }
+
+            Write-Host "   Fetching latest Stalwart release metadata..." -ForegroundColor White
+            $release = $null
+            try {
+                $release = Invoke-RestMethod `
+                    -Uri "https://api.github.com/repos/stalwartlabs/mail-server/releases/latest" `
+                    -Headers @{ "User-Agent" = "eidetic-installer" } `
+                    -UseBasicParsing
+            } catch {
+                Write-Err "Could not reach GitHub API: $($_.Exception.Message)"
+                Write-Err "Check your internet connection and re-run this script."
+                throw "Stalwart release lookup failed"
+            }
+
+            # Prefer an MSI if the release ships one; otherwise fall back to the zip.
+            $msiAsset = $release.assets | Where-Object {
+                $_.name -match "windows" -and $_.name -match "\.msi$"
+            } | Select-Object -First 1
+            $zipAsset = $release.assets | Where-Object {
+                $_.name -match "x86_64.*windows" -and $_.name -match "\.zip$"
+            } | Select-Object -First 1
+
+            if (-not $msiAsset -and -not $zipAsset) {
+                Write-Err "Latest Stalwart release has no Windows MSI or x86_64 zip asset."
+                Write-Err "Install manually from https://stalw.art/download and re-run this script."
+                throw "Stalwart release missing Windows asset"
+            }
+
+            if ($msiAsset) {
+                $downloadPath = Join-Path $env:TEMP $msiAsset.name
+                Write-Host "   Downloading $($msiAsset.name) ($([math]::Round($msiAsset.size / 1MB, 1)) MB)..." -ForegroundColor White
+                Invoke-WebRequest -Uri $msiAsset.browser_download_url -OutFile $downloadPath -UseBasicParsing
+                Write-Host "   Running MSI (silent)..." -ForegroundColor White
+                $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList @("/i", "`"$downloadPath`"", "/qn", "/norestart") -Wait -PassThru
+                if ($proc.ExitCode -ne 0) {
+                    Write-Err "msiexec exited with code $($proc.ExitCode)"
+                    throw "Stalwart MSI install failed"
+                }
+            } else {
+                $downloadPath = Join-Path $env:TEMP $zipAsset.name
+                Write-Host "   Downloading $($zipAsset.name) ($([math]::Round($zipAsset.size / 1MB, 1)) MB)..." -ForegroundColor White
+                Invoke-WebRequest -Uri $zipAsset.browser_download_url -OutFile $downloadPath -UseBasicParsing
+
+                $installRoot = Join-Path $env:ProgramFiles "Stalwart"
+                if (-not (Test-Path $installRoot)) {
+                    New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
+                }
+                Write-Host "   Extracting to $installRoot..." -ForegroundColor White
+                Expand-Archive -Path $downloadPath -DestinationPath $installRoot -Force
+
+                $stalwartBin = Get-ChildItem -Path $installRoot -Recurse -Filter "stalwart*.exe" -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -notlike "*cli*" } |
+                    Select-Object -First 1
+                if (-not $stalwartBin) {
+                    Write-Err "Extracted archive but no stalwart*.exe binary found."
+                    throw "Stalwart binary missing after extract"
+                }
+
+                $dataDir = Join-Path $repoRoot "storage\stalwart"
+                if (-not (Test-Path $dataDir)) {
+                    New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
+                }
+                $configFile = Join-Path $dataDir "etc\config.toml"
+
+                if (-not (Test-Path $configFile)) {
+                    Write-Host "   Initializing Stalwart data directory..." -ForegroundColor White
+                    & $stalwartBin.FullName --init $dataDir
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Warn "stalwart --init exited non-zero - you may need to configure manually"
+                    }
+                }
+
+                Write-Host "   Registering Windows service..." -ForegroundColor White
+                $binPathArg = '"' + $stalwartBin.FullName + '" --config "' + $configFile + '"'
+                sc.exe create Stalwart binPath= $binPathArg start= auto DisplayName= "Stalwart Mail Server" | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Err "sc.exe create failed (exit $LASTEXITCODE)"
+                    throw "Stalwart service registration failed"
+                }
+                # Point service to depend on nothing extra — default is fine
+            }
+
             Update-SessionPath
-            # Give the service a moment to register and start
-            Start-Sleep -Seconds 5
+            Start-Sleep -Seconds 3
             $stalwartService = Get-Service -Name "Stalwart*" -ErrorAction SilentlyContinue | Select-Object -First 1
             if (-not $stalwartService) {
                 Write-Err "Stalwart installed but the Windows service wasn't registered."
-                Write-Err "Reboot and re-run this script, or check the installer log."
+                Write-Err "Open services.msc and verify; otherwise re-run this script."
                 throw "Stalwart service missing"
             }
-            if ($stalwartService.Status -ne "Running") { Start-Service -Name $stalwartService.Name }
+            if ($stalwartService.Status -ne "Running") {
+                Start-Service -Name $stalwartService.Name
+                Start-Sleep -Seconds 2
+            }
             Write-Ok "Stalwart service installed ($($stalwartService.Name))"
         }
 
