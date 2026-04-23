@@ -259,38 +259,57 @@ $wantsStalwart = Read-Host "   Set up Stalwart for email + calendar? [y/N]"
 if ($wantsStalwart -notmatch "^[Yy]") {
     Write-Warn "Skipped Stalwart - email/calendar features will be inert"
 } else {
-    # Paths used by both the install path and the diagnostic path after
-    # start-up. Declared up front so the error handler can tail stderr.log.
+    # Paths used throughout the Stalwart block. Declared up front so the
+    # catch block can surface stderr.log on failure.
     $installRoot = Join-Path $env:ProgramFiles "Stalwart"
     $binDir   = Join-Path $installRoot "bin"
     $etcDir   = Join-Path $installRoot "etc"
     $dataDir  = Join-Path $installRoot "data"
     $logsDir  = Join-Path $installRoot "logs"
-    $stderrLog = Join-Path $logsDir "stderr.log"
+    $stderrLog   = Join-Path $logsDir "stderr.log"
+    $stdoutLog   = Join-Path $logsDir "stdout.log"
+    $configJson  = Join-Path $etcDir "config.json"
+    $stalwartExe = Join-Path $binDir "stalwart.exe"
+    $nssmExe     = Join-Path $binDir "nssm.exe"
 
     try {
-        # Check if the service already exists
-        $stalwartService = Get-Service -Name "Stalwart*" -ErrorAction SilentlyContinue | Select-Object -First 1
+        # --- Admin is required to start/register a Windows service ---
+        $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+        if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            Write-Err "Stalwart setup needs Administrator (required to start/register a Windows service)."
+            Write-Err "Right-click install.ps1 > Run as administrator, then try again."
+            throw "Stalwart setup requires admin"
+        }
 
-        if ($stalwartService) {
-            Write-Ok "Stalwart service already installed ($($stalwartService.Name): $($stalwartService.Status))"
-            if ($stalwartService.Status -ne "Running") {
-                Write-Host "   Starting Stalwart service..." -ForegroundColor White
-                Start-Service -Name $stalwartService.Name
-                Start-Sleep -Seconds 2
+        # --- Always wipe any existing Stalwart service so we end up with a clean NSSM registration ---
+        # Earlier runs of this script may have registered the service with
+        # New-Service (no stdio capture) or left it in a broken Stopped
+        # state. Remove first, install fresh. data / etc / logs dirs are
+        # preserved so an already-completed wizard keeps its config.
+        $existingService = Get-Service -Name "Stalwart" -ErrorAction SilentlyContinue
+        if ($existingService) {
+            Write-Host "   Existing Stalwart service found ($($existingService.Status)) - removing to re-register cleanly..." -ForegroundColor White
+            if ($existingService.Status -eq "Running") {
+                try { Stop-Service -Name Stalwart -Force -ErrorAction Stop } catch {
+                    Write-Warn "Stop-Service failed: $($_.Exception.Message) - continuing"
+                }
             }
-            # On re-run, the bootstrap creds may already be set via env var;
-            # print them out of .env.local so the user can log in again.
-            $adminPass = $null
-        } else {
-            # Admin is required for Program Files + service registration
-            $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
-            if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-                Write-Err "Stalwart install needs Administrator (for Program Files + service registration)."
-                Write-Err "Re-run install.ps1 from an elevated PowerShell, or skip Stalwart and install it manually."
-                throw "Stalwart install requires admin"
+            if (Test-Path $nssmExe) {
+                & $nssmExe remove Stalwart confirm | Out-Null
+            } else {
+                & sc.exe delete Stalwart | Out-Null
             }
+            # Give the SCM a moment to acknowledge the removal
+            Start-Sleep -Seconds 2
+        }
 
+        # --- Ensure directory layout (per Stalwart's Windows docs) ---
+        foreach ($d in @($installRoot, $binDir, $etcDir, $dataDir, $logsDir)) {
+            if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+        }
+
+        # --- Download + extract Stalwart if the binary isn't already present ---
+        if (-not (Test-Path $stalwartExe)) {
             Write-Host "   Fetching latest Stalwart release metadata..." -ForegroundColor White
             $release = $null
             try {
@@ -314,12 +333,6 @@ if ($wantsStalwart -notmatch "^[Yy]") {
                 throw "Stalwart release missing Windows asset"
             }
 
-            # Create the directory layout Stalwart expects (per Stalwart's Windows docs)
-            foreach ($d in @($installRoot, $binDir, $etcDir, $dataDir, $logsDir)) {
-                if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
-            }
-
-            # --- Download + extract Stalwart ---
             $zipPath = Join-Path $env:TEMP $zipAsset.name
             Write-Host "   Downloading $($zipAsset.name) ($([math]::Round($zipAsset.size / 1MB, 1)) MB)..." -ForegroundColor White
             Invoke-WebRequest -Uri $zipAsset.browser_download_url -OutFile $zipPath -UseBasicParsing
@@ -332,15 +345,18 @@ if ($wantsStalwart -notmatch "^[Yy]") {
                 Write-Err "stalwart.exe not found inside $($zipAsset.name)"
                 throw "Stalwart binary missing after extract"
             }
-            $stalwartExe = Join-Path $binDir "stalwart.exe"
             Copy-Item -Path $stalwartExeSrc.FullName -Destination $stalwartExe -Force
             Remove-Item $extractTmp -Recurse -Force
+        } else {
+            Write-Ok "Stalwart binary already present at $stalwartExe"
+        }
 
-            # --- Download NSSM (service wrapper that captures stdio) ---
-            # Stalwart's Windows docs officially recommend NSSM because the
-            # bootstrap-mode admin password is written to stderr and plain
-            # sc.exe / New-Service-registered services provide no way to
-            # capture it or diagnose startup failures.
+        # --- Download NSSM if missing (service wrapper that captures stdio) ---
+        # Stalwart's Windows docs recommend NSSM because the bootstrap-mode
+        # admin password is written to stderr and services registered via
+        # sc.exe / New-Service provide no way to capture it or diagnose
+        # startup failures.
+        if (-not (Test-Path $nssmExe)) {
             Write-Host "   Downloading NSSM 2.24 (service wrapper)..." -ForegroundColor White
             $nssmZip = Join-Path $env:TEMP "nssm-2.24.zip"
             try {
@@ -363,50 +379,69 @@ if ($wantsStalwart -notmatch "^[Yy]") {
                 Write-Err "nssm.exe (win64) not found inside NSSM archive"
                 throw "NSSM binary missing after extract"
             }
-            $nssmExe = Join-Path $binDir "nssm.exe"
             Copy-Item -Path $nssmExeSrc.FullName -Destination $nssmExe -Force
             Remove-Item $nssmExtract -Recurse -Force
-
-            # --- Generate bootstrap admin password and pin it via env var ---
-            # Stalwart normally writes a random bootstrap password to stderr
-            # once on first start. STALWART_RECOVERY_ADMIN=user:pass lets us
-            # set it to a known value so we don't have to tail logs.
-            $adminBytes = New-Object byte[] 16
-            $rng2 = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-            try { $rng2.GetBytes($adminBytes) } finally { $rng2.Dispose() }
-            $adminPass = ($adminBytes | ForEach-Object { $_.ToString("x2") }) -join ""
-            $bootstrapCreds = "admin:$adminPass"
-
-            # --- Register the Stalwart service via NSSM ---
-            $configJson = Join-Path $etcDir "config.json"
-            $stdoutLog  = Join-Path $logsDir "stdout.log"
-
-            Write-Host "   Registering Stalwart service via NSSM..." -ForegroundColor White
-            & $nssmExe install Stalwart $stalwartExe | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "nssm install failed (exit $LASTEXITCODE)" }
-
-            & $nssmExe set Stalwart AppParameters "--config `"$configJson`"" | Out-Null
-            & $nssmExe set Stalwart AppDirectory $installRoot | Out-Null
-            & $nssmExe set Stalwart DisplayName "Stalwart Mail Server" | Out-Null
-            & $nssmExe set Stalwart Description "Stalwart mail + CalDAV server (managed by eidetic)" | Out-Null
-            & $nssmExe set Stalwart Start SERVICE_AUTO_START | Out-Null
-            & $nssmExe set Stalwart AppStdout $stdoutLog | Out-Null
-            & $nssmExe set Stalwart AppStderr $stderrLog | Out-Null
-            & $nssmExe set Stalwart AppEnvironmentExtra "STALWART_RECOVERY_ADMIN=$bootstrapCreds" | Out-Null
-
-            Write-Host "   Starting Stalwart service..." -ForegroundColor White
-            Start-Service -Name Stalwart
-            Start-Sleep -Seconds 3
-
-            $stalwartService = Get-Service -Name "Stalwart" -ErrorAction SilentlyContinue
-            if (-not $stalwartService) {
-                Write-Err "Stalwart service wasn't registered correctly. Check: sc query Stalwart"
-                throw "Stalwart service missing"
-            }
-            Write-Ok "Stalwart service installed ($($stalwartService.Name): $($stalwartService.Status))"
+        } else {
+            Write-Ok "NSSM already present at $nssmExe"
         }
 
-        # Poll admin port (default 8080) — wait up to 60s for bootstrap mode
+        # --- Was the wizard already completed on a prior install? ---
+        # Stalwart writes config.json once the user finishes the web-admin
+        # wizard. If it exists, Stalwart won't re-enter bootstrap mode.
+        $alreadyConfigured = Test-Path $configJson
+
+        # --- Generate bootstrap admin password and pin via env var ---
+        # STALWART_RECOVERY_ADMIN=user:pass lets us set the bootstrap admin
+        # to a known value instead of tailing stderr for a random password.
+        # Only meaningful when config.json is absent (bootstrap mode).
+        $adminBytes = New-Object byte[] 16
+        $rng2 = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        try { $rng2.GetBytes($adminBytes) } finally { $rng2.Dispose() }
+        $adminPass = ($adminBytes | ForEach-Object { $_.ToString("x2") }) -join ""
+        $bootstrapCreds = "admin:$adminPass"
+
+        # --- Register the Stalwart service via NSSM ---
+        Write-Host "   Registering Stalwart service via NSSM..." -ForegroundColor White
+        & $nssmExe install Stalwart $stalwartExe | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "nssm install failed (exit $LASTEXITCODE)" }
+
+        & $nssmExe set Stalwart AppParameters "--config `"$configJson`"" | Out-Null
+        & $nssmExe set Stalwart AppDirectory $installRoot | Out-Null
+        & $nssmExe set Stalwart DisplayName "Stalwart Mail Server" | Out-Null
+        & $nssmExe set Stalwart Description "Stalwart mail + CalDAV server (managed by eidetic)" | Out-Null
+        & $nssmExe set Stalwart Start SERVICE_AUTO_START | Out-Null
+        & $nssmExe set Stalwart AppStdout $stdoutLog | Out-Null
+        & $nssmExe set Stalwart AppStderr $stderrLog | Out-Null
+        if (-not $alreadyConfigured) {
+            & $nssmExe set Stalwart AppEnvironmentExtra "STALWART_RECOVERY_ADMIN=$bootstrapCreds" | Out-Null
+        }
+
+        # --- Start the service ---
+        Write-Host "   Starting Stalwart service..." -ForegroundColor White
+        try { Start-Service -Name Stalwart -ErrorAction Stop } catch {
+            Write-Err "Start-Service failed: $($_.Exception.Message)"
+            if (Test-Path $stderrLog) {
+                Write-Err "Last 20 lines of $stderrLog :"
+                $tail = Get-Content $stderrLog -Tail 20 -ErrorAction SilentlyContinue | Out-String
+                Write-Host $tail -ForegroundColor DarkGray
+            }
+            throw "Stalwart service failed to start"
+        }
+        Start-Sleep -Seconds 3
+
+        $svc = Get-Service -Name Stalwart
+        if ($svc.Status -ne "Running") {
+            Write-Err "Stalwart service didn't stay running (status: $($svc.Status))"
+            if (Test-Path $stderrLog) {
+                Write-Err "Last 20 lines of $stderrLog :"
+                $tail = Get-Content $stderrLog -Tail 20 -ErrorAction SilentlyContinue | Out-String
+                Write-Host $tail -ForegroundColor DarkGray
+            }
+            throw "Stalwart service crashed on start"
+        }
+        Write-Ok "Stalwart service running"
+
+        # --- Poll admin port (default 8080) — wait up to 60s ---
         Write-Host "   Waiting for Stalwart admin on http://localhost:8080 ..." -ForegroundColor White
         $adminUp = $false
         for ($i = 0; $i -lt 30; $i++) {
@@ -433,88 +468,137 @@ if ($wantsStalwart -notmatch "^[Yy]") {
         }
         Write-Ok "Admin port responsive"
 
-        # --- Walk the user through the first-run wizard ---
-        Write-Host ""
-        Write-Host "   Stalwart is in BOOTSTRAP MODE. Log in with these credentials:" -ForegroundColor Cyan
-        Write-Host ""
-        Write-Host "     URL:      http://localhost:8080/admin" -ForegroundColor White
-        if ($adminPass) {
+        # --- Detect existing Stalwart creds in .env.local ---
+        $envHasStalwartCreds = $false
+        if (Test-Path $envFile) {
+            $envContentCurrent = Get-Content $envFile -Raw
+            if ($envContentCurrent -match "(?m)^STALWART_USERNAME\s*=\s*\S" -and
+                $envContentCurrent -match "(?m)^STALWART_PASSWORD\s*=\s*\S") {
+                $envHasStalwartCreds = $true
+            }
+        }
+
+        $stalwartUser = $null
+        $stalwartPass = $null
+
+        if ($alreadyConfigured -and $envHasStalwartCreds) {
+            Write-Ok "Stalwart already configured - reusing existing credentials from .env.local"
+        } elseif ($alreadyConfigured) {
+            # Wizard was done on an earlier run, but creds aren't in
+            # .env.local - just prompt for them.
+            Write-Host ""
+            Write-Host "   Stalwart is configured but I can't find its credentials in .env.local." -ForegroundColor White
+            Write-Host "   Enter the mailbox admin email + password you set up earlier." -ForegroundColor White
+            Write-Host "   (If you've lost them, stop the Stalwart service, delete" -ForegroundColor White
+            Write-Host "    '$configJson', and re-run this script to start over.)" -ForegroundColor DarkGray
+            Write-Host ""
+            $stalwartUser = Read-Host "   Stalwart mailbox email (e.g. admin@eidetic.local)"
+            $stalwartPassRaw = Read-Host "   Stalwart mailbox password" -AsSecureString
+            $stalwartPass = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
+                [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($stalwartPassRaw)
+            )
+            if (-not $stalwartUser -or -not $stalwartPass) {
+                Write-Err "Username and password are required to wire Stalwart into Eidetic."
+                throw "Stalwart credentials missing"
+            }
+        } else {
+            # Fresh install - walk through the bootstrap wizard
+            Write-Host ""
+            Write-Host "   Stalwart is in BOOTSTRAP MODE. Log in with these credentials:" -ForegroundColor Cyan
+            Write-Host ""
+            Write-Host "     URL:      http://localhost:8080/admin" -ForegroundColor White
             Write-Host "     Username: admin" -ForegroundColor White
             Write-Host "     Password: $adminPass" -ForegroundColor Yellow
-        } else {
-            Write-Host "     Username: admin" -ForegroundColor White
-            Write-Host "     Password: (value of STALWART_RECOVERY_ADMIN set when service was first installed)" -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "   In the browser:" -ForegroundColor White
+            Write-Host "     1. Step 1: hostname = 'localhost', domain = 'eidetic.local'" -ForegroundColor White
+            Write-Host "        Uncheck 'Automatically obtain TLS certificate' (no public DNS here)." -ForegroundColor White
+            Write-Host "     2. Steps 2-4: accept defaults (RocksDB / internal directory / log file)." -ForegroundColor White
+            Write-Host "     3. Step 5: leave 'Manual DNS Server Management' selected." -ForegroundColor White
+            Write-Host "     4. FINAL SCREEN: Stalwart prints an email + password for the new admin." -ForegroundColor White
+            Write-Host "        COPY BOTH - they won't be shown again. These are your mailbox creds." -ForegroundColor White
+            Write-Host "     5. Come back here and press Enter." -ForegroundColor White
+            Write-Host ""
+            Write-Host "   After that, I'll restart Stalwart so your config takes effect, then" -ForegroundColor White
+            Write-Host "   ask you to paste the admin email + password below." -ForegroundColor White
+            Write-Host ""
+            try { Start-Process "http://localhost:8080/admin" } catch {}
+
+            [void](Read-Host "   Press Enter once the wizard's final screen is showing")
+
+            # Per Stalwart's docs: restart after wizard so config.json loads.
+            Write-Host "   Restarting Stalwart to load wizard config..." -ForegroundColor White
+            Restart-Service -Name Stalwart
+            Start-Sleep -Seconds 5
+
+            Write-Host ""
+            Write-Host "   Paste the admin email and password from the wizard's final screen." -ForegroundColor White
+            Write-Host "   These become STALWART_USERNAME / STALWART_PASSWORD in .env.local." -ForegroundColor White
+            Write-Host ""
+            $stalwartUser = Read-Host "   Stalwart mailbox email (e.g. admin@eidetic.local)"
+            $stalwartPassRaw = Read-Host "   Stalwart mailbox password" -AsSecureString
+            $stalwartPass = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
+                [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($stalwartPassRaw)
+            )
+
+            if (-not $stalwartUser -or -not $stalwartPass) {
+                Write-Err "Username and password are required to wire Stalwart into Eidetic."
+                throw "Stalwart credentials missing"
+            }
+
+            Write-Host ""
+            Write-Host "   After the wizard, open http://localhost:8080/admin again and add" -ForegroundColor White
+            Write-Host "   your Outlook IMAP credentials under 'Fetched accounts' (server:" -ForegroundColor White
+            Write-Host "   outlook.office365.com:993, auth: app password, poll: every 5 min)." -ForegroundColor White
+            Write-Host "   Eidetic will pick up mail from there." -ForegroundColor White
+            Write-Host ""
         }
-        Write-Host ""
-        Write-Host "   In the browser:" -ForegroundColor White
-        Write-Host "     1. Step 1: hostname = 'localhost', domain = 'eidetic.local'" -ForegroundColor White
-        Write-Host "        Uncheck 'Automatically obtain TLS certificate' (no public DNS here)." -ForegroundColor White
-        Write-Host "     2. Steps 2-4: accept defaults (RocksDB / internal directory / log file)." -ForegroundColor White
-        Write-Host "     3. Step 5: leave 'Manual DNS Server Management' selected." -ForegroundColor White
-        Write-Host "     4. FINAL SCREEN: Stalwart prints an email + password for the new admin." -ForegroundColor White
-        Write-Host "        COPY BOTH - they won't be shown again. These are your mailbox creds." -ForegroundColor White
-        Write-Host "     5. Come back here and press Enter." -ForegroundColor White
-        Write-Host ""
-        Write-Host "   After that, I'll restart Stalwart so your config takes effect, then" -ForegroundColor White
-        Write-Host "   ask you to paste the admin email + password below." -ForegroundColor White
-        Write-Host ""
-        try { Start-Process "http://localhost:8080/admin" } catch {}
 
-        [void](Read-Host "   Press Enter once the wizard's final screen is showing")
-
-        # Per Stalwart's docs: restart the service after the wizard so the
-        # new config.json is loaded.
-        Write-Host "   Restarting Stalwart to load wizard config..." -ForegroundColor White
-        Restart-Service -Name Stalwart
-        Start-Sleep -Seconds 5
-
-        Write-Host ""
-        Write-Host "   Paste the admin email and password from the wizard's final screen." -ForegroundColor White
-        Write-Host "   These become STALWART_USERNAME / STALWART_PASSWORD in .env.local." -ForegroundColor White
-        Write-Host ""
-        $stalwartUser = Read-Host "   Stalwart mailbox email (e.g. admin@eidetic.local)"
-        $stalwartPassRaw = Read-Host "   Stalwart mailbox password" -AsSecureString
-        $stalwartPass = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
-            [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($stalwartPassRaw)
-        )
-
-        if (-not $stalwartUser -or -not $stalwartPass) {
-            Write-Err "Username and password are required to wire Stalwart into Eidetic."
-            throw "Stalwart credentials missing"
-        }
-
-        Write-Host ""
-        Write-Host "   After the wizard, open http://localhost:8080/admin again and add" -ForegroundColor White
-        Write-Host "   your Outlook IMAP credentials under 'Fetched accounts' (server:" -ForegroundColor White
-        Write-Host "   outlook.office365.com:993, auth: app password, poll: every 5 min)." -ForegroundColor White
-        Write-Host "   Eidetic will pick up mail from there." -ForegroundColor White
-        Write-Host ""
-
-        # Append Stalwart env vars to .env.local (.env.local exists from step 6)
-        $jmapUrl   = "http://localhost:8080/jmap"
-        $caldavUrl = "http://localhost:8080/dav"
-        Add-Content -Path $envFile -Value "" -Encoding UTF8
-        Add-Content -Path $envFile -Value "# Stalwart (email + calendar)" -Encoding UTF8
-        Add-Content -Path $envFile -Value "STALWART_JMAP_URL=$jmapUrl" -Encoding UTF8
-        Add-Content -Path $envFile -Value "STALWART_CALDAV_URL=$caldavUrl" -Encoding UTF8
-        Add-Content -Path $envFile -Value "STALWART_USERNAME=$stalwartUser" -Encoding UTF8
-        Add-Content -Path $envFile -Value "STALWART_PASSWORD=$stalwartPass" -Encoding UTF8
-        Write-Ok "Wrote STALWART_* to .env.local"
-
-        # Generate VAPID keypair for Web Push (Step 53) — node script ships with web-push
-        Write-Host "   Generating VAPID keys for Web Push..." -ForegroundColor White
-        $vapidOutput = & node -e "const w=require('web-push');const k=w.generateVAPIDKeys();console.log(k.publicKey);console.log(k.privateKey);" 2>&1 | Out-String
-        $vapidLines = $vapidOutput.Trim().Split("`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-        if ($vapidLines.Count -ge 2) {
+        # --- Write STALWART_* to .env.local (strip any prior block first) ---
+        if ($stalwartUser -and $stalwartPass) {
+            $jmapUrl   = "http://localhost:8080/jmap"
+            $caldavUrl = "http://localhost:8080/dav"
+            if (Test-Path $envFile) {
+                $envKeep = Get-Content $envFile | Where-Object {
+                    $_ -notmatch "^STALWART_" -and $_ -notmatch "^# Stalwart"
+                }
+                Set-Content -Path $envFile -Value $envKeep -Encoding UTF8
+            }
             Add-Content -Path $envFile -Value "" -Encoding UTF8
-            Add-Content -Path $envFile -Value "# Web Push (Phase 14 notifications)" -Encoding UTF8
-            Add-Content -Path $envFile -Value "VAPID_PUBLIC_KEY=$($vapidLines[0])" -Encoding UTF8
-            Add-Content -Path $envFile -Value "VAPID_PRIVATE_KEY=$($vapidLines[1])" -Encoding UTF8
-            Add-Content -Path $envFile -Value "VAPID_SUBJECT=mailto:admin@eidetic.local" -Encoding UTF8
-            Write-Ok "VAPID keys generated"
+            Add-Content -Path $envFile -Value "# Stalwart (email + calendar)" -Encoding UTF8
+            Add-Content -Path $envFile -Value "STALWART_JMAP_URL=$jmapUrl" -Encoding UTF8
+            Add-Content -Path $envFile -Value "STALWART_CALDAV_URL=$caldavUrl" -Encoding UTF8
+            Add-Content -Path $envFile -Value "STALWART_USERNAME=$stalwartUser" -Encoding UTF8
+            Add-Content -Path $envFile -Value "STALWART_PASSWORD=$stalwartPass" -Encoding UTF8
+            Write-Ok "Wrote STALWART_* to .env.local"
+        }
+
+        # --- VAPID keys for Web Push (only generate if not already present) ---
+        $envNeedsVapid = $true
+        if (Test-Path $envFile) {
+            $envContentCurrent = Get-Content $envFile -Raw
+            if ($envContentCurrent -match "(?m)^VAPID_PUBLIC_KEY\s*=\s*\S") {
+                $envNeedsVapid = $false
+            }
+        }
+
+        if ($envNeedsVapid) {
+            Write-Host "   Generating VAPID keys for Web Push..." -ForegroundColor White
+            $vapidOutput = & node -e "const w=require('web-push');const k=w.generateVAPIDKeys();console.log(k.publicKey);console.log(k.privateKey);" 2>&1 | Out-String
+            $vapidLines = $vapidOutput.Trim().Split("`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+            if ($vapidLines.Count -ge 2) {
+                Add-Content -Path $envFile -Value "" -Encoding UTF8
+                Add-Content -Path $envFile -Value "# Web Push (Phase 14 notifications)" -Encoding UTF8
+                Add-Content -Path $envFile -Value "VAPID_PUBLIC_KEY=$($vapidLines[0])" -Encoding UTF8
+                Add-Content -Path $envFile -Value "VAPID_PRIVATE_KEY=$($vapidLines[1])" -Encoding UTF8
+                Add-Content -Path $envFile -Value "VAPID_SUBJECT=mailto:admin@eidetic.local" -Encoding UTF8
+                Write-Ok "VAPID keys generated"
+            } else {
+                Write-Warn "Could not generate VAPID keys automatically - Web Push will be disabled"
+                Write-Warn "Run: node -e `"console.log(require('web-push').generateVAPIDKeys())`""
+            }
         } else {
-            Write-Warn "Could not generate VAPID keys automatically - Web Push will be disabled"
-            Write-Warn "Run: node -e `"console.log(require('web-push').generateVAPIDKeys())`""
+            Write-Ok "VAPID keys already present in .env.local"
         }
 
     } catch {
