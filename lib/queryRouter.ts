@@ -1,14 +1,16 @@
 import { spawnSync } from "child_process";
 import path from "path";
 import db from "@/lib/db";
+import { detectCalendarIntent } from "@/lib/calendarTools";
 
-export type QueryMode = "rag" | "wiki" | "hybrid" | "chat";
+export type QueryMode = "rag" | "wiki" | "hybrid" | "chat" | "calendar";
 export type QueryCategory =
   | "lookup"
   | "summary"
   | "comparison"
   | "trend"
   | "citation_required"
+  | "calendar_action"
   | "chat";
 
 export interface RagChunk {
@@ -54,6 +56,12 @@ export interface RouteResult {
 
 function classifyQuery(query: string): { category: QueryCategory; mode: QueryMode } {
   const q = query.toLowerCase();
+
+  // Calendar actions take priority — they short-circuit the normal RAG/wiki path
+  // and get dispatched through the tool loop in the messages route.
+  if (detectCalendarIntent(query)) {
+    return { category: "calendar_action", mode: "calendar" };
+  }
 
   if (/\b(source|proof|evidence|cite|citation|where did you find|reference|confirm|verify)\b/.test(q)) {
     return { category: "citation_required", mode: "rag" };
@@ -221,6 +229,19 @@ function buildSystemPrompt(
 
 export function routeQuery(query: string): RouteResult {
   const { category, mode } = classifyQuery(query);
+
+  // Calendar-action queries skip RAG/wiki retrieval — the messages route will
+  // invoke the tool dispatcher instead of a normal LLM completion.
+  if (mode === "calendar") {
+    return {
+      mode,
+      category,
+      systemPrompt: "",
+      chunks: [],
+      wikiPages: [],
+      hasContext: false,
+    };
+  }
 
   const hasEmbeds =
     (db.prepare(`SELECT COUNT(*) AS cnt FROM chunks`).get() as { cnt: number }).cnt > 0;

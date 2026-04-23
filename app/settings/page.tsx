@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import PushToggle from "@/components/PushToggle";
 
 interface NetworkInfo {
   addresses: { name: string; address: string; family: string }[];
@@ -181,6 +182,17 @@ export default function SettingsPage() {
               </p>
             </>
           )}
+        </div>
+
+        {/* Notifications */}
+        <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-5">
+          <h2 className="text-sm font-medium text-zinc-300 mb-3">Notifications</h2>
+          <PushToggle />
+          <p className="mt-3 text-xs text-zinc-600">
+            The in-app banner always polls for upcoming meetings and new emails.
+            Web Push adds OS-level alerts for watched correspondents and imminent
+            meetings, even when eidetic isn&apos;t open.
+          </p>
         </div>
 
         {/* Authentication */}

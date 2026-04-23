@@ -241,6 +241,137 @@ npm.cmd run build
 if ($LASTEXITCODE -ne 0) { Write-Err "Build failed"; throw "npm run build failed" }
 Write-Ok "Build complete"
 
+# -- 7b. Stalwart (optional: email + calendar backbone) --------------
+
+Write-Step "Setting up Stalwart (email + calendar backbone)"
+
+Write-Host ""
+Write-Host "   Stalwart is a local mail + CalDAV server that pulls your Outlook" -ForegroundColor White
+Write-Host "   mail on a schedule and hosts a calendar iPhone / Thunderbird can" -ForegroundColor White
+Write-Host "   sync with. Eidetic then indexes both for RAG + LLM tool calls." -ForegroundColor White
+Write-Host ""
+Write-Host "   Cost: a Windows service (~200 MB RAM) + storage/stalwart/ folder." -ForegroundColor White
+Write-Host "   You can skip this and still use all document-ingestion features." -ForegroundColor White
+Write-Host ""
+
+$wantsStalwart = Read-Host "   Set up Stalwart for email + calendar? [y/N]"
+
+if ($wantsStalwart -notmatch "^[Yy]") {
+    Write-Warn "Skipped Stalwart - email/calendar features will be inert"
+} else {
+    try {
+        # Check if the service already exists
+        $stalwartService = Get-Service -Name "Stalwart*" -ErrorAction SilentlyContinue | Select-Object -First 1
+
+        if ($stalwartService) {
+            Write-Ok "Stalwart service already installed ($($stalwartService.Name): $($stalwartService.Status))"
+            if ($stalwartService.Status -ne "Running") {
+                Write-Host "   Starting Stalwart service..." -ForegroundColor White
+                Start-Service -Name $stalwartService.Name
+                Start-Sleep -Seconds 2
+            }
+        } else {
+            Write-Host "   Installing Stalwart via winget..." -ForegroundColor White
+            winget install --id Stalwart.Mail -e --accept-package-agreements --accept-source-agreements
+            if ($LASTEXITCODE -ne 0) {
+                Write-Err "winget install failed. Winget may not have a manifest for Stalwart yet."
+                Write-Err "Install manually from https://stalw.art/download and re-run this script."
+                throw "Stalwart install failed"
+            }
+            Update-SessionPath
+            # Give the service a moment to register and start
+            Start-Sleep -Seconds 5
+            $stalwartService = Get-Service -Name "Stalwart*" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $stalwartService) {
+                Write-Err "Stalwart installed but the Windows service wasn't registered."
+                Write-Err "Reboot and re-run this script, or check the installer log."
+                throw "Stalwart service missing"
+            }
+            if ($stalwartService.Status -ne "Running") { Start-Service -Name $stalwartService.Name }
+            Write-Ok "Stalwart service installed ($($stalwartService.Name))"
+        }
+
+        # Poll admin port (default 8080) — wait up to 60s
+        Write-Host "   Waiting for Stalwart admin on http://localhost:8080 ..." -ForegroundColor White
+        $adminUp = $false
+        for ($i = 0; $i -lt 30; $i++) {
+            try {
+                $r = Invoke-WebRequest -Uri "http://localhost:8080" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+                if ($r.StatusCode -lt 500) { $adminUp = $true; break }
+            } catch {
+                # Stalwart may answer 401/403 before we have credentials — that still counts as up
+                $msg = $_.Exception.Message
+                if ($msg -match "401|403|Unauthorized|Forbidden") { $adminUp = $true; break }
+            }
+            Start-Sleep -Seconds 2
+        }
+
+        if (-not $adminUp) {
+            Write-Err "Stalwart admin port 8080 isn't responding after 60s."
+            Write-Err "Check 'Get-Service $($stalwartService.Name)' and the Stalwart logs."
+            throw "Stalwart admin unreachable"
+        }
+        Write-Ok "Admin port responsive"
+
+        Write-Host ""
+        Write-Host "   Stalwart's first-run wizard needs a browser interaction to create" -ForegroundColor White
+        Write-Host "   the admin principal and the single mailbox. Opening it now..." -ForegroundColor White
+        Write-Host ""
+        Write-Host "   In the browser:" -ForegroundColor White
+        Write-Host "     1. Create the admin account (pick a strong password - you'll paste it here)" -ForegroundColor White
+        Write-Host "     2. Create ONE user mailbox - any username is fine; the password you set" -ForegroundColor White
+        Write-Host "        for this user is what Eidetic will use." -ForegroundColor White
+        Write-Host "     3. Under 'Fetched accounts' (or IMAP import), add your Outlook IMAP" -ForegroundColor White
+        Write-Host "        credentials (outlook.office365.com:993, app password, poll every" -ForegroundColor White
+        Write-Host "        5 minutes)." -ForegroundColor White
+        Write-Host ""
+        try { Start-Process "http://localhost:8080" } catch {}
+
+        $stalwartUser = Read-Host "   Stalwart mailbox username"
+        $stalwartPassRaw = Read-Host "   Stalwart mailbox password" -AsSecureString
+        $stalwartPass = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
+            [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($stalwartPassRaw)
+        )
+
+        if (-not $stalwartUser -or -not $stalwartPass) {
+            Write-Err "Username and password are required to wire Stalwart into Eidetic."
+            throw "Stalwart credentials missing"
+        }
+
+        # Append Stalwart env vars to .env.local (.env.local exists from step 6)
+        $jmapUrl   = "http://localhost:8080/jmap"
+        $caldavUrl = "http://localhost:8080/dav"
+        Add-Content -Path $envFile -Value "" -Encoding UTF8
+        Add-Content -Path $envFile -Value "# Stalwart (email + calendar)" -Encoding UTF8
+        Add-Content -Path $envFile -Value "STALWART_JMAP_URL=$jmapUrl" -Encoding UTF8
+        Add-Content -Path $envFile -Value "STALWART_CALDAV_URL=$caldavUrl" -Encoding UTF8
+        Add-Content -Path $envFile -Value "STALWART_USERNAME=$stalwartUser" -Encoding UTF8
+        Add-Content -Path $envFile -Value "STALWART_PASSWORD=$stalwartPass" -Encoding UTF8
+        Write-Ok "Wrote STALWART_* to .env.local"
+
+        # Generate VAPID keypair for Web Push (Step 53) — node script ships with web-push
+        Write-Host "   Generating VAPID keys for Web Push..." -ForegroundColor White
+        $vapidOutput = & node -e "const w=require('web-push');const k=w.generateVAPIDKeys();console.log(k.publicKey);console.log(k.privateKey);" 2>&1 | Out-String
+        $vapidLines = $vapidOutput.Trim().Split("`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+        if ($vapidLines.Count -ge 2) {
+            Add-Content -Path $envFile -Value "" -Encoding UTF8
+            Add-Content -Path $envFile -Value "# Web Push (Phase 14 notifications)" -Encoding UTF8
+            Add-Content -Path $envFile -Value "VAPID_PUBLIC_KEY=$($vapidLines[0])" -Encoding UTF8
+            Add-Content -Path $envFile -Value "VAPID_PRIVATE_KEY=$($vapidLines[1])" -Encoding UTF8
+            Add-Content -Path $envFile -Value "VAPID_SUBJECT=mailto:admin@eidetic.local" -Encoding UTF8
+            Write-Ok "VAPID keys generated"
+        } else {
+            Write-Warn "Could not generate VAPID keys automatically - Web Push will be disabled"
+            Write-Warn "Run: node -e `"console.log(require('web-push').generateVAPIDKeys())`""
+        }
+
+    } catch {
+        Write-Err "Stalwart setup failed: $($_.Exception.Message)"
+        Write-Err "Email/calendar features will stay inert until you re-run this script."
+        Write-Warn "Continuing without Stalwart - other features will still work"
+    }
+}
+
 # -- 8. Tailscale Funnel (remote HTTPS access) -----------------------
 
 Write-Step "Setting up Tailscale Funnel (remote HTTPS access)"
