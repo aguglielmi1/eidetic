@@ -337,27 +337,36 @@ if ($wantsStalwart -notmatch "^[Yy]") {
                 }
 
                 $dataDir = Join-Path $repoRoot "storage\stalwart"
-                if (-not (Test-Path $dataDir)) {
-                    New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
-                }
-                $configFile = Join-Path $dataDir "etc\config.toml"
-
-                if (-not (Test-Path $configFile)) {
-                    Write-Host "   Initializing Stalwart data directory..." -ForegroundColor White
-                    & $stalwartBin.FullName --init $dataDir
-                    if ($LASTEXITCODE -ne 0) {
-                        Write-Warn "stalwart --init exited non-zero - you may need to configure manually"
+                $etcDir  = Join-Path $dataDir "etc"
+                foreach ($d in @($dataDir, $etcDir)) {
+                    if (-not (Test-Path $d)) {
+                        New-Item -ItemType Directory -Path $d -Force | Out-Null
                     }
                 }
+                # Stalwart >= 0.11 boots into a web-based setup wizard when the
+                # --config path doesn't exist. We create the directory but leave
+                # the file absent so the first service start drives the wizard
+                # at http://localhost:8080.
+                $configFile = Join-Path $etcDir "config.toml"
 
                 Write-Host "   Registering Windows service..." -ForegroundColor White
-                $binPathArg = '"' + $stalwartBin.FullName + '" --config "' + $configFile + '"'
-                sc.exe create Stalwart binPath= $binPathArg start= auto DisplayName= "Stalwart Mail Server" | Out-Null
-                if ($LASTEXITCODE -ne 0) {
-                    Write-Err "sc.exe create failed (exit $LASTEXITCODE)"
+                # New-Service hands BinaryPathName to the Service Control Manager
+                # verbatim, so pre-quote the exe and config paths the way sc.exe
+                # would expect. Avoids the ERROR_INVALID_COMMAND_LINE (1639) that
+                # sc.exe throws when PowerShell double-escapes the binPath arg.
+                $binPath = '"{0}" --config "{1}"' -f $stalwartBin.FullName, $configFile
+                try {
+                    New-Service `
+                        -Name "Stalwart" `
+                        -BinaryPathName $binPath `
+                        -DisplayName "Stalwart Mail Server" `
+                        -StartupType Automatic `
+                        -Description "Stalwart mail and CalDAV server (managed by eidetic)" `
+                        -ErrorAction Stop | Out-Null
+                } catch {
+                    Write-Err "New-Service failed: $($_.Exception.Message)"
                     throw "Stalwart service registration failed"
                 }
-                # Point service to depend on nothing extra — default is fine
             }
 
             Update-SessionPath
