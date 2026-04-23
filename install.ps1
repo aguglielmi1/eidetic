@@ -578,8 +578,31 @@ if ($wantsStalwart -notmatch "^[Yy]") {
             [void](Read-Host "   Press Enter once the wizard's final screen is showing")
 
             # Per Stalwart's docs: restart after wizard so config.json loads.
+            # The wizard's default listener config tries to bind 25 / 80 /
+            # 443 / etc. On Windows those often collide with IIS, the
+            # Windows SMTP service, or other mail software - surface the
+            # real reason from stderr.log so the user can resolve it.
             Write-Host "   Restarting Stalwart to load wizard config..." -ForegroundColor White
-            Restart-Service -Name Stalwart
+            try {
+                Restart-Service -Name Stalwart -ErrorAction Stop
+            } catch {
+                Write-Err "Restart-Service failed: $($_.Exception.Message)"
+                if (Test-Path $stderrLog) {
+                    Write-Err "Last 30 lines of $stderrLog :"
+                    Get-Content $stderrLog -Tail 30 -ErrorAction SilentlyContinue |
+                        ForEach-Object { Write-Host "     $_" -ForegroundColor DarkGray }
+                }
+                if (Test-Path $stdoutLog) {
+                    Write-Err "Last 30 lines of $stdoutLog :"
+                    Get-Content $stdoutLog -Tail 30 -ErrorAction SilentlyContinue |
+                        ForEach-Object { Write-Host "     $_" -ForegroundColor DarkGray }
+                }
+                Write-Err "Common causes on Windows:"
+                Write-Err "  - ports 25/80/443 bound by IIS or the Windows SMTP service"
+                Write-Err "  - wizard configured a TLS cert that can't be loaded"
+                Write-Err "Fix the conflict, then re-run install.ps1 to finish setup."
+                throw "Stalwart restart failed after wizard"
+            }
             Start-Sleep -Seconds 5
 
             Write-Host ""
