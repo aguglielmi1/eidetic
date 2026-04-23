@@ -441,32 +441,56 @@ if ($wantsStalwart -notmatch "^[Yy]") {
         }
         Write-Ok "Stalwart service running"
 
-        # --- Poll admin port (default 8080) — wait up to 60s ---
-        Write-Host "   Waiting for Stalwart admin on http://localhost:8080 ..." -ForegroundColor White
-        $adminUp = $false
-        for ($i = 0; $i -lt 30; $i++) {
-            try {
-                $r = Invoke-WebRequest -Uri "http://localhost:8080" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
-                if ($r.StatusCode -lt 500) { $adminUp = $true; break }
-            } catch {
-                $msg = $_.Exception.Message
-                if ($msg -match "401|403|Unauthorized|Forbidden") { $adminUp = $true; break }
+        # --- Poll admin port (default 8080) — wait up to 120s ---
+        # Stalwart's bootstrap listener binds to "[::]:8080". On Windows
+        # that socket is IPv6-only by default (unlike Linux), so 127.0.0.1
+        # won't connect. We TCP-probe both loopbacks and remember whichever
+        # accepts the connection - that becomes the admin URL for the
+        # browser and the JMAP/CalDAV URLs written to .env.local.
+        # Raw TCP (not HTTP) keeps us immune to /admin returning 404/503
+        # while webui.zip is still downloading in the background.
+        Write-Host "   Waiting for Stalwart port 8080 to accept connections ..." -ForegroundColor White
+        $adminHost = $null
+        $candidates = @(
+            @{ Ip = "127.0.0.1"; UrlHost = "127.0.0.1" },
+            @{ Ip = "::1"; UrlHost = "[::1]" }
+        )
+        for ($i = 0; $i -lt 60; $i++) {
+            foreach ($c in $candidates) {
+                $tcp = New-Object System.Net.Sockets.TcpClient
+                try {
+                    $t = $tcp.ConnectAsync($c.Ip, 8080)
+                    try { [void]$t.Wait(2000) } catch {}
+                    if ($tcp.Connected) {
+                        $adminHost = $c.UrlHost
+                        break
+                    }
+                } catch {} finally {
+                    try { $tcp.Close() } catch {}
+                }
             }
-            Start-Sleep -Seconds 2
+            if ($adminHost) { break }
+            Start-Sleep -Seconds 1
         }
 
-        if (-not $adminUp) {
-            Write-Err "Stalwart admin port 8080 isn't responding after 60s."
+        if (-not $adminHost) {
+            Write-Err "Stalwart isn't accepting connections on port 8080 after 120s."
             if (Test-Path $stderrLog) {
                 Write-Err "Last 20 lines of $stderrLog :"
-                $tail = Get-Content $stderrLog -Tail 20 -ErrorAction SilentlyContinue | Out-String
-                Write-Host $tail -ForegroundColor DarkGray
-            } else {
-                Write-Err "No stderr log at $stderrLog - service may have failed before writing anything."
+                Get-Content $stderrLog -Tail 20 -ErrorAction SilentlyContinue |
+                    ForEach-Object { Write-Host "     $_" -ForegroundColor DarkGray }
             }
+            if (Test-Path $stdoutLog) {
+                Write-Err "Last 20 lines of $stdoutLog :"
+                Get-Content $stdoutLog -Tail 20 -ErrorAction SilentlyContinue |
+                    ForEach-Object { Write-Host "     $_" -ForegroundColor DarkGray }
+            }
+            Write-Err "Diagnose with: Test-NetConnection -ComputerName ::1 -Port 8080"
             throw "Stalwart admin unreachable"
         }
-        Write-Ok "Admin port responsive"
+
+        $adminUrl = "http://$($adminHost):8080/admin"
+        Write-Ok "Admin port responsive via $adminHost"
 
         # --- Detect existing Stalwart creds in .env.local ---
         $envHasStalwartCreds = $false
@@ -506,7 +530,7 @@ if ($wantsStalwart -notmatch "^[Yy]") {
             Write-Host ""
             Write-Host "   Stalwart is in BOOTSTRAP MODE. Log in with these credentials:" -ForegroundColor Cyan
             Write-Host ""
-            Write-Host "     URL:      http://localhost:8080/admin" -ForegroundColor White
+            Write-Host "     URL:      $adminUrl" -ForegroundColor White
             Write-Host "     Username: admin" -ForegroundColor White
             Write-Host "     Password: $adminPass" -ForegroundColor Yellow
             Write-Host ""
@@ -522,7 +546,7 @@ if ($wantsStalwart -notmatch "^[Yy]") {
             Write-Host "   After that, I'll restart Stalwart so your config takes effect, then" -ForegroundColor White
             Write-Host "   ask you to paste the admin email + password below." -ForegroundColor White
             Write-Host ""
-            try { Start-Process "http://localhost:8080/admin" } catch {}
+            try { Start-Process $adminUrl } catch {}
 
             [void](Read-Host "   Press Enter once the wizard's final screen is showing")
 
@@ -547,7 +571,7 @@ if ($wantsStalwart -notmatch "^[Yy]") {
             }
 
             Write-Host ""
-            Write-Host "   After the wizard, open http://localhost:8080/admin again and add" -ForegroundColor White
+            Write-Host "   After the wizard, open $adminUrl again and add" -ForegroundColor White
             Write-Host "   your Outlook IMAP credentials under 'Fetched accounts' (server:" -ForegroundColor White
             Write-Host "   outlook.office365.com:993, auth: app password, poll: every 5 min)." -ForegroundColor White
             Write-Host "   Eidetic will pick up mail from there." -ForegroundColor White
@@ -556,8 +580,8 @@ if ($wantsStalwart -notmatch "^[Yy]") {
 
         # --- Write STALWART_* to .env.local (strip any prior block first) ---
         if ($stalwartUser -and $stalwartPass) {
-            $jmapUrl   = "http://localhost:8080/jmap"
-            $caldavUrl = "http://localhost:8080/dav"
+            $jmapUrl   = "http://$($adminHost):8080/jmap"
+            $caldavUrl = "http://$($adminHost):8080/dav"
             if (Test-Path $envFile) {
                 $envKeep = Get-Content $envFile | Where-Object {
                     $_ -notmatch "^STALWART_" -and $_ -notmatch "^# Stalwart"
