@@ -112,9 +112,73 @@ for (const stmt of [
   "ALTER TABLE documents ADD COLUMN wiki_page_slug TEXT",
   "ALTER TABLE documents ADD COLUMN content_hash TEXT",
   "ALTER TABLE documents ADD COLUMN ignored INTEGER NOT NULL DEFAULT 0",
+  // Phase 14 — email metadata carried on the document row
+  "ALTER TABLE documents ADD COLUMN email_message_id TEXT",
+  "ALTER TABLE documents ADD COLUMN email_thread_id TEXT",
+  // Phase 14 — email fragment columns
+  "ALTER TABLE document_fragments ADD COLUMN email_message_id TEXT",
+  "ALTER TABLE document_fragments ADD COLUMN email_thread_id TEXT",
+  "ALTER TABLE document_fragments ADD COLUMN email_from TEXT",
+  "ALTER TABLE document_fragments ADD COLUMN email_to TEXT",
+  "ALTER TABLE document_fragments ADD COLUMN email_subject TEXT",
+  "ALTER TABLE document_fragments ADD COLUMN email_date TEXT",
+  // Phase 14 — event fragment columns
+  "ALTER TABLE document_fragments ADD COLUMN event_uid TEXT",
+  "ALTER TABLE document_fragments ADD COLUMN event_start_at INTEGER",
+  "ALTER TABLE document_fragments ADD COLUMN event_end_at INTEGER",
+  // Phase 14 — watch flag for person wiki pages drives push notifications
+  "ALTER TABLE wiki_pages ADD COLUMN watch INTEGER NOT NULL DEFAULT 0",
 ]) {
   try { db.exec(stmt); } catch { /* already exists */ }
 }
+
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_documents_email_thread
+    ON documents(email_thread_id);
+
+  CREATE INDEX IF NOT EXISTS idx_fragments_email_thread
+    ON document_fragments(email_thread_id);
+`);
+
+// Phase 14 — calendar events (mirror of CalDAV state for fast reads + RAG)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS events (
+    id           TEXT PRIMARY KEY,
+    uid          TEXT NOT NULL UNIQUE,
+    calendar_id  TEXT NOT NULL,
+    summary      TEXT,
+    description  TEXT,
+    location     TEXT,
+    start_at     INTEGER,
+    end_at       INTEGER,
+    rrule        TEXT,
+    status       TEXT,
+    completed    INTEGER NOT NULL DEFAULT 0,
+    is_task      INTEGER NOT NULL DEFAULT 0,
+    etag         TEXT,
+    url          TEXT,
+    raw_ical     TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_events_start
+    ON events(start_at);
+  CREATE INDEX IF NOT EXISTS idx_events_calendar
+    ON events(calendar_id);
+`);
+
+// Phase 14 — web push subscriptions (per device)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id         TEXT PRIMARY KEY,
+    endpoint   TEXT NOT NULL UNIQUE,
+    p256dh     TEXT NOT NULL,
+    auth       TEXT NOT NULL,
+    user_agent TEXT,
+    created_at INTEGER NOT NULL
+  );
+`);
 
 // Phase 8 — job queue for tracking pending reprocessing work
 db.exec(`

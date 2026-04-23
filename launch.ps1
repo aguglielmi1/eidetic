@@ -180,6 +180,38 @@ if ($pulled -or -not (Test-Path ".next")) {
     Write-Ok ".next is current - skipping rebuild"
 }
 
+# --- 5b. Verify Stalwart (if configured) -----------------------------
+
+Write-Step "Checking Stalwart"
+
+$stalwartState = "unconfigured"  # unconfigured / running / stopped / missing
+$envFile = Join-Path $PSScriptRoot ".env.local"
+$stalwartConfigured = $false
+if (Test-Path $envFile) {
+    $envContent = Get-Content $envFile -Raw
+    if ($envContent -match "(?m)^STALWART_JMAP_URL\s*=\s*\S") {
+        $stalwartConfigured = $true
+    }
+}
+
+if (-not $stalwartConfigured) {
+    Write-Ok "Stalwart not configured - email/calendar features disabled"
+} else {
+    $stalwartService = Get-Service -Name "Stalwart*" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $stalwartService) {
+        $stalwartState = "missing"
+        Write-Warn "STALWART_JMAP_URL is set but no 'Stalwart' Windows service is installed."
+        Write-Warn "Re-run install.ps1 to install it, or clear the STALWART_* lines in .env.local."
+    } elseif ($stalwartService.Status -ne "Running") {
+        $stalwartState = "stopped"
+        Write-Warn "Stalwart service is $($stalwartService.Status) - email/calendar features will be inert"
+        Write-Warn "Start it with: Start-Service $($stalwartService.Name)"
+    } else {
+        $stalwartState = "running"
+        Write-Ok "Stalwart active ($($stalwartService.Name))"
+    }
+}
+
 # --- 6. Verify Tailscale Funnel --------------------------------------
 
 Write-Step "Checking Tailscale Funnel"
@@ -246,6 +278,13 @@ if ($publicUrl) {
             Write-Host "  Public URL: $cachedUrl" -ForegroundColor White
         }
     }
+}
+
+switch ($stalwartState) {
+    "running"      { Write-Host "  Stalwart:   active" -ForegroundColor Green }
+    "stopped"      { Write-Host "  Stalwart:   stopped (email/calendar inert)" -ForegroundColor Yellow }
+    "missing"      { Write-Host "  Stalwart:   configured but not installed" -ForegroundColor Yellow }
+    default        { }
 }
 
 Write-Host ""

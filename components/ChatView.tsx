@@ -33,11 +33,21 @@ interface WikiPageRef {
   page_type: string;
 }
 
+interface PendingAction {
+  id: string;
+  tool: string;
+  args: Record<string, unknown>;
+  issuedAt: number;
+  signature: string;
+}
+
 interface SourcesData {
-  mode: "rag" | "wiki" | "hybrid" | "chat";
+  mode: "rag" | "wiki" | "hybrid" | "chat" | "calendar";
   category: string;
   chunks: SourceChunk[];
   wikiPages: WikiPageRef[];
+  pendingAction?: PendingAction;
+  toolCall?: { tool: string; args: Record<string, unknown>; result: unknown };
 }
 
 interface ChatViewProps {
@@ -57,19 +67,21 @@ function parseSources(sourcesJson: string | null | undefined): SourcesData | nul
 
 function modeLabel(mode: string): string {
   switch (mode) {
-    case "rag":    return "RAG";
-    case "wiki":   return "Wiki";
-    case "hybrid": return "Hybrid";
-    default:       return "";
+    case "rag":      return "RAG";
+    case "wiki":     return "Wiki";
+    case "hybrid":   return "Hybrid";
+    case "calendar": return "Calendar";
+    default:         return "";
   }
 }
 
 function modeBadgeClass(mode: string): string {
   switch (mode) {
-    case "rag":    return "bg-blue-900 text-blue-300 border border-blue-700";
-    case "wiki":   return "bg-purple-900 text-purple-300 border border-purple-700";
-    case "hybrid": return "bg-teal-900 text-teal-300 border border-teal-700";
-    default:       return "";
+    case "rag":      return "bg-blue-900 text-blue-300 border border-blue-700";
+    case "wiki":     return "bg-purple-900 text-purple-300 border border-purple-700";
+    case "hybrid":   return "bg-teal-900 text-teal-300 border border-teal-700";
+    case "calendar": return "bg-amber-900 text-amber-300 border border-amber-700";
+    default:         return "";
   }
 }
 
@@ -88,7 +100,8 @@ function SourcesPanel({ sources }: { sources: SourcesData }) {
   if (sources.mode === "chat") return null;
   const hasChunks = sources.chunks.length > 0;
   const hasWiki = sources.wikiPages.length > 0;
-  if (!hasChunks && !hasWiki) return null;
+  const hasTool = sources.toolCall != null;
+  if (!hasChunks && !hasWiki && !hasTool) return null;
 
   return (
     <div className="mt-2 pt-2 border-t border-zinc-700 space-y-1">
@@ -96,8 +109,17 @@ function SourcesPanel({ sources }: { sources: SourcesData }) {
         <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${modeBadgeClass(sources.mode)}`}>
           {modeLabel(sources.mode)}
         </span>
-        <span className="text-[10px] text-zinc-500">Sources used</span>
+        <span className="text-[10px] text-zinc-500">
+          {sources.mode === "calendar" ? "Calendar action" : "Sources used"}
+        </span>
       </div>
+
+      {hasTool && (
+        <div className="text-[10px] text-zinc-400">
+          🔧 <span className="text-zinc-300">{sources.toolCall!.tool}</span>
+          <span className="ml-1 text-zinc-600">({sources.category})</span>
+        </div>
+      )}
 
       {hasChunks && (
         <ul className="space-y-0.5">
@@ -121,6 +143,104 @@ function SourcesPanel({ sources }: { sources: SourcesData }) {
             </li>
           ))}
         </ul>
+      )}
+    </div>
+  );
+}
+
+function formatArgValue(value: unknown): string {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.join(", ");
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function PendingActionCard({
+  action,
+  onResolved,
+}: {
+  action: PendingAction;
+  onResolved: (status: "confirmed" | "cancelled", resultText?: string) => void;
+}) {
+  const [state, setState] = useState<"idle" | "running" | "done" | "cancelled" | "error">("idle");
+  const [error, setError] = useState<string | null>(null);
+
+  const entries = Object.entries(action.args).filter(([, v]) => v != null && v !== "");
+
+  const confirm = async () => {
+    setState("running");
+    setError(null);
+    try {
+      const res = await fetch("/api/calendar/tools/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(action),
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; message?: string; error?: string };
+      if (!res.ok || data.ok === false) {
+        setState("error");
+        setError(data.error ?? data.message ?? `HTTP ${res.status}`);
+        return;
+      }
+      setState("done");
+      onResolved("confirmed", data.message ?? "Done.");
+    } catch (err) {
+      setState("error");
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const cancel = () => {
+    setState("cancelled");
+    onResolved("cancelled");
+  };
+
+  return (
+    <div className="mt-3 rounded-lg border border-amber-700 bg-amber-950/40 p-3 text-xs text-amber-100">
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <span className="font-semibold uppercase tracking-wide text-amber-300">
+          {action.tool}
+        </span>
+        <span className="text-[10px] text-amber-500/70">needs confirmation</span>
+      </div>
+      {entries.length > 0 && (
+        <dl className="space-y-0.5 mb-3">
+          {entries.map(([k, v]) => (
+            <div key={k} className="flex gap-2">
+              <dt className="text-amber-400/80 w-24 shrink-0">{k}</dt>
+              <dd className="text-amber-100 break-all">{formatArgValue(v)}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      {state === "idle" && (
+        <div className="flex gap-2">
+          <button
+            onClick={confirm}
+            className="rounded bg-amber-600 hover:bg-amber-500 px-3 py-1 text-xs font-medium text-white"
+          >
+            Confirm
+          </button>
+          <button
+            onClick={cancel}
+            className="rounded bg-zinc-700 hover:bg-zinc-600 px-3 py-1 text-xs font-medium text-zinc-100"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+      {state === "running" && (
+        <div className="text-amber-300">Applying…</div>
+      )}
+      {state === "done" && (
+        <div className="text-emerald-400">✓ Applied</div>
+      )}
+      {state === "cancelled" && (
+        <div className="text-zinc-400">Cancelled</div>
+      )}
+      {state === "error" && (
+        <div className="text-red-400">Error: {error ?? "unknown"}</div>
       )}
     </div>
   );
@@ -271,7 +391,43 @@ export default function ChatView({
               )}
               {msg.role === "assistant" && (() => {
                 const sources = parseSources(msg.sources_json);
-                return sources ? <SourcesPanel sources={sources} /> : null;
+                if (!sources) return null;
+                return (
+                  <>
+                    <SourcesPanel sources={sources} />
+                    {sources.pendingAction && (
+                      <PendingActionCard
+                        action={sources.pendingAction}
+                        onResolved={(status, resultText) => {
+                          // Mark the pending action consumed so the card won't
+                          // re-appear if the user navigates away and back.
+                          setMessages((prev) =>
+                            prev.map((m) => {
+                              if (m.id !== msg.id) return m;
+                              try {
+                                const parsed = JSON.parse(m.sources_json ?? "{}") as SourcesData;
+                                delete parsed.pendingAction;
+                                return { ...m, sources_json: JSON.stringify(parsed) };
+                              } catch {
+                                return m;
+                              }
+                            })
+                          );
+                          if (status === "confirmed" && resultText) {
+                            const followUp: Message = {
+                              id: crypto.randomUUID?.() ?? Math.random().toString(36).slice(2),
+                              role: "assistant",
+                              content: `✓ ${resultText}`,
+                              sources_json: null,
+                              created_at: Date.now(),
+                            };
+                            setMessages((prev) => [...prev, followUp]);
+                          }
+                        }}
+                      />
+                    )}
+                  </>
+                );
               })()}
             </div>
           </div>

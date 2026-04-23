@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { usePathname } from "next/navigation";
 import Sidebar from "./Sidebar";
+import NotificationBanner from "./NotificationBanner";
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -18,6 +19,8 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
 
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
+        <NotificationBanner />
+
         {/* Mobile top bar */}
         <header className="safe-top flex items-center gap-3 px-4 py-3 border-b border-zinc-800 lg:hidden">
           <button

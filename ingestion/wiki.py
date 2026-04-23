@@ -23,6 +23,8 @@ Page types produced:
     doc           — one page per PDF / DOCX document
     presentation  — one page per PPTX file
     data          — one page per XLSX spreadsheet
+    thread        — one page per email thread (Phase 14)
+    person        — one page per correspondent (Phase 14)
 """
 
 import sys
@@ -293,6 +295,166 @@ def generate_spreadsheet_page(doc, fragments: list, ollama_url: str, model: str)
 
 
 # ---------------------------------------------------------------------------
+# Phase 14 — email thread + correspondent pages
+# ---------------------------------------------------------------------------
+
+def primary_email_of(addr_text: str | None) -> str | None:
+    """Extract the `user@domain` part from a `Name <user@domain>` string."""
+    if not addr_text:
+        return None
+    from email.utils import parseaddr
+    _, email = parseaddr(addr_text.split(",")[0])
+    return email.lower() if email else None
+
+
+def generate_thread_page(thread_id: str, doc_rows: list, conn: sqlite3.Connection,
+                         ollama_url: str, model: str) -> tuple[str, str, list[str]]:
+    """Return (title, markdown content, source_doc_ids) for an email thread."""
+    parts = []
+    evidence_lines = []
+    subject = None
+    source_ids: list[str] = []
+
+    for doc in doc_rows:
+        source_ids.append(doc["id"])
+        frags = conn.execute(
+            """SELECT text, fragment_type, email_from, email_subject, email_date
+               FROM document_fragments
+               WHERE document_id = ?
+               ORDER BY CASE fragment_type WHEN 'email_headers' THEN 0 ELSE 1 END,
+                        created_at ASC""",
+            (doc["id"],),
+        ).fetchall()
+        for f in frags:
+            if f["text"]:
+                if subject is None and f["email_subject"]:
+                    subject = f["email_subject"]
+                parts.append(f"[{f['email_date'] or ''} / {f['email_from'] or ''}]\n{f['text']}")
+        evidence_lines.append(f"- message: {doc['email_message_id'] or doc['original_name']}")
+
+    subject = subject or "Email thread"
+    context = truncate_context(parts)
+    evidence_block = "\n".join(evidence_lines)
+
+    user_msg = (
+        f"Summarize the email thread titled **{subject}**.\n\n"
+        f"Messages (oldest first):\n{context}\n\n"
+        "The page must include these sections:\n"
+        "# Thread: {subject}\n"
+        "## Summary\n"
+        "## Decisions\n"
+        "## Action items\n"
+        f"## Evidence\n{evidence_block}\n\n"
+        "Write the complete wiki page now."
+    )
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_msg},
+    ]
+    content = call_ollama(messages, ollama_url, model)
+    return subject, content, source_ids
+
+
+def generate_person_page(email_addr: str, conn: sqlite3.Connection,
+                         ollama_url: str, model: str) -> tuple[str, str, list[str]]:
+    """Aggregate every thread with the given correspondent into a person page."""
+    # Find all email docs whose from or to contains this address.
+    rows = conn.execute(
+        """SELECT DISTINCT d.id, d.original_name, d.email_thread_id, d.email_message_id
+           FROM documents d
+           JOIN document_fragments f ON f.document_id = d.id
+           WHERE d.file_type = 'email'
+             AND f.fragment_type = 'email_headers'
+             AND (LOWER(COALESCE(f.email_from, '')) LIKE ?
+                  OR LOWER(COALESCE(f.email_to,   '')) LIKE ?)""",
+        (f"%{email_addr.lower()}%", f"%{email_addr.lower()}%"),
+    ).fetchall()
+
+    source_ids = [r["id"] for r in rows]
+    threads: dict[str, list[dict]] = {}
+    for r in rows:
+        tid = r["email_thread_id"] or r["email_message_id"] or r["id"]
+        threads.setdefault(tid, []).append(dict(r))
+
+    context_parts = []
+    evidence_lines = []
+    for tid, msgs in threads.items():
+        subj_row = conn.execute(
+            """SELECT email_subject, email_date FROM document_fragments
+               WHERE document_id = ? AND fragment_type = 'email_headers' LIMIT 1""",
+            (msgs[0]["id"],),
+        ).fetchone()
+        subj = (subj_row["email_subject"] if subj_row else None) or "(no subject)"
+        date = (subj_row["email_date"] if subj_row else None) or "?"
+        context_parts.append(f"Thread {tid} — {subj} — {date}")
+        for m in msgs:
+            bodies = conn.execute(
+                "SELECT text FROM document_fragments WHERE document_id = ? AND fragment_type = 'email_body' ORDER BY created_at ASC",
+                (m["id"],),
+            ).fetchall()
+            for b in bodies:
+                if b["text"]:
+                    context_parts.append(b["text"])
+        evidence_lines.append(f"- thread: {subj} ({tid})")
+
+    context = truncate_context(context_parts)
+    evidence_block = "\n".join(evidence_lines) or f"- correspondent: {email_addr}"
+
+    user_msg = (
+        f"Build a wiki page for the correspondent **{email_addr}**.\n\n"
+        f"Email excerpts:\n{context}\n\n"
+        "The page must include these sections:\n"
+        f"# Person: {email_addr}\n"
+        "## Overview\n"
+        "## Recurring topics\n"
+        "## Open action items\n"
+        f"## Evidence\n{evidence_block}\n\n"
+        "Write the complete wiki page now."
+    )
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_msg},
+    ]
+    content = call_ollama(messages, ollama_url, model)
+    return email_addr, content, source_ids
+
+
+def process_email_thread(thread_id: str, conn: sqlite3.Connection,
+                         wiki_path: Path, ollama_url: str, model: str):
+    doc_rows = conn.execute(
+        """SELECT * FROM documents
+           WHERE file_type = 'email' AND email_thread_id = ?
+           ORDER BY created_at ASC""",
+        (thread_id,),
+    ).fetchall()
+    if not doc_rows:
+        print(f"[wiki] No email docs for thread {thread_id}")
+        return
+
+    title, content, source_ids = generate_thread_page(
+        thread_id, list(doc_rows), conn, ollama_url, model
+    )
+    slug = f"thread-{slugify(thread_id)}"
+    file_path = str(wiki_path / "thread" / f"{slugify(thread_id)}.md")
+    upsert_wiki_page(conn, slug, "thread", title, content, file_path, source_ids)
+    for d in doc_rows:
+        set_wiki_status(conn, d["id"], "generated", page_slug=slug)
+
+
+def process_person_page(email_addr: str, conn: sqlite3.Connection,
+                        wiki_path: Path, ollama_url: str, model: str):
+    title, content, source_ids = generate_person_page(email_addr, conn, ollama_url, model)
+    if not source_ids:
+        print(f"[wiki] No messages for {email_addr}")
+        return
+    slug = f"person-{slugify(email_addr)}"
+    file_path = str(wiki_path / "person" / f"{slugify(email_addr)}.md")
+    upsert_wiki_page(conn, slug, "person", title, content, file_path, source_ids)
+
+
+# ---------------------------------------------------------------------------
 # Document processor
 # ---------------------------------------------------------------------------
 
@@ -385,6 +547,19 @@ def process_document(doc_id: str, conn: sqlite3.Connection,
             upsert_wiki_page(conn, slug, "data", doc["original_name"], content, file_path, [doc_id])
             set_wiki_status(conn, doc_id, "generated", page_slug=slug)
 
+        elif file_type == "email":
+            thread_id = doc["email_thread_id"] or doc["email_message_id"] or doc_id
+            process_email_thread(thread_id, conn, wiki_path, ollama_url, model)
+
+            # Also rebuild the sender person page
+            header = conn.execute(
+                "SELECT email_from FROM document_fragments WHERE document_id = ? AND fragment_type = 'email_headers' LIMIT 1",
+                (doc_id,),
+            ).fetchone()
+            sender = primary_email_of(header["email_from"] if header else None)
+            if sender:
+                process_person_page(sender, conn, wiki_path, ollama_url, model)
+
         else:
             print(f"[wiki] Unknown file type: {file_type}", file=sys.stderr)
             set_wiki_status(conn, doc_id, "wiki_failed", f"Unsupported file type: {file_type}")
@@ -456,7 +631,29 @@ def rebuild_dirty_pages(conn: sqlite3.Connection, wiki_path: Path,
             # Rebuild by re-processing the first source document
             # (for vendor pages, process_document aggregates all docs with the same vendor)
             print(f"[wiki] Rebuilding: {slug} (type={page_type}, sources={len(valid_doc_ids)})")
-            process_document(valid_doc_ids[0], conn, wiki_path, ollama_url, model)
+
+            if page_type == "thread":
+                # Derive thread id from any of the source email docs
+                thread_doc = conn.execute(
+                    "SELECT email_thread_id, email_message_id FROM documents WHERE id = ?",
+                    (valid_doc_ids[0],),
+                ).fetchone()
+                thread_id = None
+                if thread_doc:
+                    thread_id = thread_doc["email_thread_id"] or thread_doc["email_message_id"]
+                if thread_id:
+                    process_email_thread(thread_id, conn, wiki_path, ollama_url, model)
+                else:
+                    process_document(valid_doc_ids[0], conn, wiki_path, ollama_url, model)
+            elif page_type == "person":
+                # slug = person-<slugified-email>; use the stored title as the canonical address
+                title_row = conn.execute(
+                    "SELECT title FROM wiki_pages WHERE slug = ?", (slug,)
+                ).fetchone()
+                if title_row and title_row["title"]:
+                    process_person_page(title_row["title"], conn, wiki_path, ollama_url, model)
+            else:
+                process_document(valid_doc_ids[0], conn, wiki_path, ollama_url, model)
 
             # Mark jobs as completed
             conn.execute(
