@@ -560,8 +560,9 @@ if ($wantsStalwart -notmatch "^[Yy]") {
             Write-Host "     Password: $adminPass" -ForegroundColor Yellow
             Write-Host ""
             Write-Host "   In the browser:" -ForegroundColor White
-            Write-Host "     1. Step 1: hostname = 'mail.eidetic.local', domain = 'eidetic.local'" -ForegroundColor White
-            Write-Host "        (hostname must be a FQDN - 'localhost' is rejected as invalid.)" -ForegroundColor White
+            Write-Host "     1. Step 1: hostname = '127.0.0.1', domain = 'eidetic.example.com'" -ForegroundColor White
+            Write-Host "        (Stalwart rejects .local and other non-public TLDs; an IP" -ForegroundColor White
+            Write-Host "         bypasses the FQDN check. example.com is RFC 2606 reserved.)" -ForegroundColor White
             Write-Host "        Uncheck 'Automatically obtain TLS certificate' (no public DNS here)." -ForegroundColor White
             Write-Host "     2. Steps 2-4: accept defaults (RocksDB / internal directory / log file)." -ForegroundColor White
             Write-Host "     3. Step 5: leave 'Manual DNS Server Management' selected." -ForegroundColor White
