@@ -449,6 +449,10 @@ if ($wantsStalwart -notmatch "^[Yy]") {
         # browser and the JMAP/CalDAV URLs written to .env.local.
         # Raw TCP (not HTTP) keeps us immune to /admin returning 404/503
         # while webui.zip is still downloading in the background.
+        # NOTE: TcpClient() defaults to InterNetwork (IPv4), so a plain
+        # `ConnectAsync("::1", ...)` silently fails. Parse the candidate
+        # to an IPAddress and construct the client with the matching
+        # AddressFamily so v6 probes actually reach a v6 listener.
         Write-Host "   Waiting for Stalwart port 8080 to accept connections ..." -ForegroundColor White
         $adminHost = $null
         $candidates = @(
@@ -457,9 +461,10 @@ if ($wantsStalwart -notmatch "^[Yy]") {
         )
         for ($i = 0; $i -lt 60; $i++) {
             foreach ($c in $candidates) {
-                $tcp = New-Object System.Net.Sockets.TcpClient
+                $ip = [System.Net.IPAddress]::Parse($c.Ip)
+                $tcp = New-Object System.Net.Sockets.TcpClient -ArgumentList ($ip.AddressFamily)
                 try {
-                    $t = $tcp.ConnectAsync($c.Ip, 8080)
+                    $t = $tcp.ConnectAsync($ip, 8080)
                     try { [void]$t.Wait(2000) } catch {}
                     if ($tcp.Connected) {
                         $adminHost = $c.UrlHost
@@ -475,6 +480,26 @@ if ($wantsStalwart -notmatch "^[Yy]") {
 
         if (-not $adminHost) {
             Write-Err "Stalwart isn't accepting connections on port 8080 after 120s."
+
+            # Show what Windows sees listening on 8080, and whether each
+            # loopback is reachable via Test-NetConnection (which uses
+            # the correct address family internally).
+            $listeners = Get-NetTCPConnection -LocalPort 8080 -State Listen -ErrorAction SilentlyContinue
+            if ($listeners) {
+                Write-Err "Listeners on port 8080:"
+                $listeners | ForEach-Object {
+                    Write-Host "     $($_.LocalAddress):$($_.LocalPort) -> PID $($_.OwningProcess)" -ForegroundColor DarkGray
+                }
+            } else {
+                Write-Err "Nothing is listening on port 8080 (service may have failed to bind)."
+            }
+            Write-Err "Loopback probe (via Test-NetConnection):"
+            foreach ($ip in @("127.0.0.1", "::1")) {
+                $ok = $false
+                try { $ok = Test-NetConnection -ComputerName $ip -Port 8080 -InformationLevel Quiet -WarningAction SilentlyContinue } catch {}
+                Write-Host "     $ip`:8080 -> $(if ($ok) { 'OK' } else { 'fail' })" -ForegroundColor DarkGray
+            }
+
             if (Test-Path $stderrLog) {
                 Write-Err "Last 20 lines of $stderrLog :"
                 Get-Content $stderrLog -Tail 20 -ErrorAction SilentlyContinue |
@@ -485,7 +510,7 @@ if ($wantsStalwart -notmatch "^[Yy]") {
                 Get-Content $stdoutLog -Tail 20 -ErrorAction SilentlyContinue |
                     ForEach-Object { Write-Host "     $_" -ForegroundColor DarkGray }
             }
-            Write-Err "Diagnose with: Test-NetConnection -ComputerName ::1 -Port 8080"
+
             throw "Stalwart admin unreachable"
         }
 
