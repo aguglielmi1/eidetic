@@ -412,8 +412,23 @@ if ($wantsStalwart -notmatch "^[Yy]") {
         & $nssmExe set Stalwart Start SERVICE_AUTO_START | Out-Null
         & $nssmExe set Stalwart AppStdout $stdoutLog | Out-Null
         & $nssmExe set Stalwart AppStderr $stderrLog | Out-Null
+
+        # AppEnvironmentExtra has to be written directly to the registry:
+        # `nssm set Stalwart AppEnvironmentExtra "KEY=VALUE"` splits its
+        # input on ":" so Stalwart's user:pass credential format is
+        # rejected as "not KEY=VALUE". Writing the REG_MULTI_SZ under
+        # the service's Parameters key bypasses that parser entirely.
         if (-not $alreadyConfigured) {
-            & $nssmExe set Stalwart AppEnvironmentExtra "STALWART_RECOVERY_ADMIN=$bootstrapCreds" | Out-Null
+            $nssmRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Stalwart\Parameters"
+            if (-not (Test-Path $nssmRegPath)) {
+                Write-Err "NSSM Parameters key missing at $nssmRegPath - nssm install likely failed silently."
+                throw "NSSM Parameters key missing"
+            }
+            New-ItemProperty -Path $nssmRegPath `
+                -Name "AppEnvironmentExtra" `
+                -PropertyType MultiString `
+                -Value @("STALWART_RECOVERY_ADMIN=$bootstrapCreds") `
+                -Force | Out-Null
         }
 
         # --- Start the service ---
@@ -566,6 +581,12 @@ if ($wantsStalwart -notmatch "^[Yy]") {
             Write-Host "        Uncheck 'Automatically obtain TLS certificate' (no public DNS here)." -ForegroundColor White
             Write-Host "     2. Steps 2-4: accept defaults (RocksDB / internal directory / log file)." -ForegroundColor White
             Write-Host "     3. Step 5: leave 'Manual DNS Server Management' selected." -ForegroundColor White
+            Write-Host "     !! CRITICAL: BEFORE submitting any step, check EVERY email/domain" -ForegroundColor Yellow
+            Write-Host "        field for a stale '.local' value (Stalwart auto-fills some" -ForegroundColor Yellow
+            Write-Host "        fields like postmaster/contact email based on the hostname" -ForegroundColor Yellow
+            Write-Host "        shown on startup, which is your Windows hostname + .local)." -ForegroundColor Yellow
+            Write-Host "        Replace anything ending in .local with @example.com - Stalwart" -ForegroundColor Yellow
+            Write-Host "        silently aborts wizard submission on the first invalid email." -ForegroundColor Yellow
             Write-Host "     4. FINAL SCREEN: Stalwart prints an email + password for the new admin." -ForegroundColor White
             Write-Host "        COPY BOTH - they won't be shown again. These are your mailbox creds." -ForegroundColor White
             Write-Host "     5. Come back here and press Enter." -ForegroundColor White
