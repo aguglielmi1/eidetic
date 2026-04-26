@@ -24,10 +24,20 @@ export const listEventsSchema = z.object({
   to: z.string().optional(),
 });
 
+// ISO-8601 datetime guard. Accepts both with and without milliseconds, with
+// either Z or +HH:MM offsets. Use this for every user/LLM-supplied date so we
+// never pipe `new Date("tomorrow")` into ical.js (which silently writes a
+// `DUE:NaN-aNNaNTNN:aN` property that Stalwart accepts but no client can read).
+const isoDateTime = z
+  .string()
+  .refine((v) => !Number.isNaN(new Date(v).getTime()), {
+    message: "must be a valid ISO-8601 datetime",
+  });
+
 export const createEventSchema = z.object({
   summary: z.string().min(1),
-  start: z.string(),
-  end: z.string(),
+  start: isoDateTime,
+  end: isoDateTime,
   description: z.string().optional(),
   attendees: z.array(z.string()).optional(),
   location: z.string().optional(),
@@ -35,8 +45,8 @@ export const createEventSchema = z.object({
 
 export const moveEventSchema = z.object({
   uid: z.string().min(1),
-  newStart: z.string(),
-  newEnd: z.string(),
+  newStart: isoDateTime,
+  newEnd: isoDateTime,
 });
 
 export const cancelEventSchema = z.object({
@@ -45,7 +55,7 @@ export const cancelEventSchema = z.object({
 
 export const createTaskSchema = z.object({
   summary: z.string().min(1),
-  due: z.string().optional(),
+  due: isoDateTime.optional(),
   description: z.string().optional(),
 });
 
@@ -381,23 +391,26 @@ function toIcalUtc(d: Date): string {
 // Tool prompt (structured output)
 // ---------------------------------------------------------------------------
 
-export const TOOL_SYSTEM_PROMPT = [
-  "You are a calendar assistant. The user's message is a calendar request.",
-  "Decide which tool to call and reply ONLY with a JSON object matching:",
-  "  {\"tool\":\"<toolName>\",\"args\":{…}}",
-  "No prose, no markdown fences, no explanation.",
-  "",
-  "Available tools (JSON schemas):",
-  "  listEvents:   {\"range\":\"today|tomorrow|this_week|next_week|custom\",\"from\"?:\"ISO-8601\",\"to\"?:\"ISO-8601\"}",
-  "  createEvent:  {\"summary\":string,\"start\":\"ISO-8601\",\"end\":\"ISO-8601\",\"description\"?:string,\"location\"?:string,\"attendees\"?:string[]}",
-  "  moveEvent:    {\"uid\":string,\"newStart\":\"ISO-8601\",\"newEnd\":\"ISO-8601\"}",
-  "  cancelEvent:  {\"uid\":string}",
-  "  createTask:   {\"summary\":string,\"due\"?:\"ISO-8601\",\"description\"?:string}",
-  "  completeTask: {\"uid\":string}",
-  "",
-  "Use the user's local timezone for ISO-8601 values. Default event duration: 60 minutes.",
-  "If the request isn't a calendar action, emit {\"tool\":\"none\",\"args\":{}}.",
-].join("\n");
+export function toolSystemPrompt(now: Date = new Date()): string {
+  return [
+    `Current date/time: ${now.toISOString()} (use this to resolve relative phrases like "in 10 minutes", "tomorrow", "next Tuesday").`,
+    "You are a calendar assistant. The user's message is a calendar request.",
+    "Decide which tool to call and reply ONLY with a JSON object matching:",
+    "  {\"tool\":\"<toolName>\",\"args\":{…}}",
+    "No prose, no markdown fences, no explanation.",
+    "",
+    "Available tools (JSON schemas):",
+    "  listEvents:   {\"range\":\"today|tomorrow|this_week|next_week|custom\",\"from\"?:\"ISO-8601\",\"to\"?:\"ISO-8601\"}",
+    "  createEvent:  {\"summary\":string,\"start\":\"ISO-8601\",\"end\":\"ISO-8601\",\"description\"?:string,\"location\"?:string,\"attendees\"?:string[]}",
+    "  moveEvent:    {\"uid\":string,\"newStart\":\"ISO-8601\",\"newEnd\":\"ISO-8601\"}",
+    "  cancelEvent:  {\"uid\":string}",
+    "  createTask:   {\"summary\":string,\"due\"?:\"ISO-8601\",\"description\"?:string}",
+    "  completeTask: {\"uid\":string}",
+    "",
+    "Use the user's local timezone for ISO-8601 values. Default event duration: 60 minutes.",
+    "If the request isn't a calendar action, emit {\"tool\":\"none\",\"args\":{}}.",
+  ].join("\n");
+}
 
 export function detectCalendarIntent(query: string): boolean {
   const q = query.toLowerCase();

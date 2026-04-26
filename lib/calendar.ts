@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import ICAL from "ical.js";
 import { createDAVClient, type DAVCalendar, type DAVCalendarObject } from "tsdav";
+import { xml2js, type Element as XmlElement } from "xml-js";
 import db from "@/lib/db";
 
 export interface EventRow {
@@ -62,6 +63,32 @@ export interface ParsedEvent {
   isTask: boolean;
 }
 
+// ical.js eagerly hydrates date properties when you read them, and a
+// malformed value (e.g. `DUE:NaN-aNNaNTNN:aN` from older builds before the
+// `requireValidDate` guard, or anything an external client wrote) throws from
+// inside `getFirstPropertyValue`. Don't let one bad property poison the whole
+// component — return null and keep going.
+function safeMs(comp: ICAL.Component, prop: string): number | null {
+  try {
+    const v = comp.getFirstPropertyValue(prop);
+    if (v && typeof (v as ICAL.Time).toUnixTime === "function") {
+      return (v as ICAL.Time).toUnixTime() * 1000;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function safeString(comp: ICAL.Component, prop: string): string | null {
+  try {
+    const v = comp.getFirstPropertyValue(prop);
+    return typeof v === "string" ? v : v == null ? null : String(v);
+  } catch {
+    return null;
+  }
+}
+
 export function parseIcalObject(raw: string): ParsedEvent[] {
   const jcal = ICAL.parse(raw);
   const root = new ICAL.Component(jcal as unknown as unknown[]);
@@ -69,43 +96,33 @@ export function parseIcalObject(raw: string): ParsedEvent[] {
   const results: ParsedEvent[] = [];
 
   for (const vevent of root.getAllSubcomponents("vevent")) {
-    const event = new ICAL.Event(vevent);
+    const uid = safeString(vevent, "uid");
+    if (!uid) continue;
     results.push({
-      uid: event.uid,
-      summary: event.summary ?? null,
-      description: event.description ?? null,
-      location: event.location ?? null,
-      start_at: event.startDate ? event.startDate.toUnixTime() * 1000 : null,
-      end_at: event.endDate ? event.endDate.toUnixTime() * 1000 : null,
-      rrule: vevent.getFirstPropertyValue("rrule")?.toString() ?? null,
-      status: (vevent.getFirstPropertyValue("status") as string | null) ?? null,
+      uid,
+      summary: safeString(vevent, "summary"),
+      description: safeString(vevent, "description"),
+      location: safeString(vevent, "location"),
+      start_at: safeMs(vevent, "dtstart"),
+      end_at: safeMs(vevent, "dtend"),
+      rrule: safeString(vevent, "rrule"),
+      status: safeString(vevent, "status"),
       completed: false,
       isTask: false,
     });
   }
 
   for (const vtodo of root.getAllSubcomponents("vtodo")) {
-    const uid = vtodo.getFirstPropertyValue("uid") as string | null;
+    const uid = safeString(vtodo, "uid");
     if (!uid) continue;
-    const summary = (vtodo.getFirstPropertyValue("summary") as string | null) ?? null;
-    const description = (vtodo.getFirstPropertyValue("description") as string | null) ?? null;
-    const due = vtodo.getFirstPropertyValue("due");
-    const dtstart = vtodo.getFirstPropertyValue("dtstart");
-    const status = (vtodo.getFirstPropertyValue("status") as string | null) ?? null;
-    const startAt = dtstart && typeof (dtstart as ICAL.Time).toUnixTime === "function"
-      ? (dtstart as ICAL.Time).toUnixTime() * 1000
-      : null;
-    const endAt = due && typeof (due as ICAL.Time).toUnixTime === "function"
-      ? (due as ICAL.Time).toUnixTime() * 1000
-      : null;
-
+    const status = safeString(vtodo, "status");
     results.push({
       uid,
-      summary,
-      description,
+      summary: safeString(vtodo, "summary"),
+      description: safeString(vtodo, "description"),
       location: null,
-      start_at: startAt,
-      end_at: endAt,
+      start_at: safeMs(vtodo, "dtstart"),
+      end_at: safeMs(vtodo, "due"),
       rrule: null,
       status,
       completed: status === "COMPLETED",
@@ -269,29 +286,49 @@ export async function syncCalendar(opts?: {
   const calendars = await client.fetchCalendars();
   const pastDays = opts?.pastDays ?? 30;
   const futureDays = opts?.futureDays ?? 180;
-  const start = new Date(Date.now() - pastDays * 864e5).toISOString();
-  const end = new Date(Date.now() + futureDays * 864e5).toISOString();
+  const start = toIcalUtcStamp(Date.now() - pastDays * 864e5);
+  const end = toIcalUtcStamp(Date.now() + futureDays * 864e5);
 
   let eventCount = 0;
   for (const cal of calendars) {
-    const objects = await client.fetchCalendarObjects({
-      calendar: cal,
-      timeRange: { start, end },
-      expand: false,
-    });
+    if (!cal.url) continue;
+    const components = Array.isArray(cal.components) ? cal.components : [];
+    const want: { comp: "VEVENT" | "VTODO"; range?: { start: string; end: string } }[] = [];
+    if (components.length === 0 || components.includes("VEVENT")) {
+      want.push({ comp: "VEVENT", range: { start, end } });
+    }
+    if (components.length === 0 || components.includes("VTODO")) {
+      want.push({ comp: "VTODO" });
+    }
 
     const key = calendarKey(cal);
-    for (const obj of objects) {
-      const raw = obj.data;
-      if (typeof raw !== "string" || !raw) continue;
+    for (const q of want) {
+      let objects: DAVCalendarObject[];
       try {
-        for (const parsed of parseIcalObject(raw)) {
-          const eventId = upsertEvent(key, obj, parsed);
-          writeEventFragment(eventId, parsed, raw);
-          eventCount += 1;
-        }
+        objects = await reportCalendarObjects(cfg, cal.url, q.comp, q.range);
       } catch (exc) {
-        console.error("[calendar] parse failure", obj.url, exc);
+        // Real network/parse failure (not a Stalwart "no matches" 404, which
+        // reportCalendarObjects already swallows). Skip this comp-filter and
+        // keep going so one broken query doesn't poison the whole sync.
+        console.error(
+          `[calendar] REPORT ${q.comp} failed`,
+          cal.url,
+          exc
+        );
+        continue;
+      }
+      for (const obj of objects) {
+        const raw = obj.data;
+        if (typeof raw !== "string" || !raw) continue;
+        try {
+          for (const parsed of parseIcalObject(raw)) {
+            const eventId = upsertEvent(key, obj, parsed);
+            writeEventFragment(eventId, parsed, raw);
+            eventCount += 1;
+          }
+        } catch (exc) {
+          console.error("[calendar] parse failure", obj.url, exc);
+        }
       }
     }
   }
@@ -302,6 +339,145 @@ export async function syncCalendar(opts?: {
   ).run(String(Date.now()));
 
   return { calendars: calendars.length, events: eventCount };
+}
+
+// ---------------------------------------------------------------------------
+// REPORT calendar-query helper
+//
+// We bypass tsdav's fetchCalendarObjects for two reasons:
+//   1. Stalwart returns a non-RFC-4791 "no matches" response — a 207 multistatus
+//      containing a single <response> with status 404 + "No resources found" on
+//      the collection URL. tsdav treats any >=400 status inside the multistatus
+//      as a hard error and throws. We need to recognise that pattern as empty.
+//   2. tsdav's timeRange path only filters VEVENT, so VTODOs are never synced.
+//      We want to query both component types per calendar.
+// ---------------------------------------------------------------------------
+
+function buildCalendarQueryBody(
+  comp: "VEVENT" | "VTODO",
+  range?: { start: string; end: string }
+): string {
+  const innerFilter = range
+    ? `<C:comp-filter name="${comp}"><C:time-range start="${range.start}" end="${range.end}"/></C:comp-filter>`
+    : `<C:comp-filter name="${comp}"/>`;
+  return [
+    `<?xml version="1.0" encoding="utf-8" ?>`,
+    `<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">`,
+    `  <D:prop><D:getetag/><C:calendar-data/></D:prop>`,
+    `  <C:filter><C:comp-filter name="VCALENDAR">${innerFilter}</C:comp-filter></C:filter>`,
+    `</C:calendar-query>`,
+  ].join("\n");
+}
+
+function findChild(el: XmlElement, name: string): XmlElement | undefined {
+  if (!el.elements) return undefined;
+  const lower = name.toLowerCase();
+  return el.elements.find((c) => {
+    const n = c.name?.toLowerCase() ?? "";
+    return n === lower || n.endsWith(`:${lower}`);
+  });
+}
+
+function findChildren(el: XmlElement, name: string): XmlElement[] {
+  if (!el.elements) return [];
+  const lower = name.toLowerCase();
+  return el.elements.filter((c) => {
+    const n = c.name?.toLowerCase() ?? "";
+    return n === lower || n.endsWith(`:${lower}`);
+  });
+}
+
+function elementText(el: XmlElement | undefined): string {
+  if (!el?.elements) return "";
+  return el.elements
+    .map((c) => {
+      if (c.type === "text") return typeof c.text === "string" ? c.text : "";
+      if (c.type === "cdata") return typeof c.cdata === "string" ? c.cdata : "";
+      return "";
+    })
+    .join("");
+}
+
+async function reportCalendarObjects(
+  cfg: StalwartConfig,
+  collectionUrl: string,
+  comp: "VEVENT" | "VTODO",
+  range?: { start: string; end: string }
+): Promise<DAVCalendarObject[]> {
+  const body = buildCalendarQueryBody(comp, range);
+  const auth = Buffer.from(`${cfg.username}:${cfg.password}`).toString("base64");
+  const res = await fetch(collectionUrl, {
+    method: "REPORT",
+    headers: {
+      Authorization: `Basic ${auth}`,
+      Depth: "1",
+      "Content-Type": "application/xml; charset=utf-8",
+    },
+    body,
+  });
+
+  if (res.status !== 207) {
+    throw new Error(`REPORT returned HTTP ${res.status} ${res.statusText}`);
+  }
+  const text = await res.text();
+  const parsed = xml2js(text, { compact: false }) as { elements?: XmlElement[] };
+  const multistatus = parsed.elements?.find((e) => {
+    const n = e.name?.toLowerCase() ?? "";
+    return n === "multistatus" || n.endsWith(":multistatus");
+  });
+  if (!multistatus) return [];
+
+  const responses = findChildren(multistatus, "response");
+  const collectionPath = new URL(collectionUrl).pathname;
+  const results: DAVCalendarObject[] = [];
+
+  for (const r of responses) {
+    const hrefEl = findChild(r, "href");
+    const href = elementText(hrefEl).trim();
+    // Stalwart's "no matches" reply: a single <response> on the collection URL
+    // itself with a 404 status. Skip it rather than treating it as an error.
+    if (href === collectionPath || href === collectionUrl) continue;
+
+    // Each <response> can contain multiple <propstat> blocks, only one of which
+    // (the 200) carries calendar-data. Iterate them and pick that one.
+    for (const propstat of findChildren(r, "propstat")) {
+      const statusText = elementText(findChild(propstat, "status"));
+      if (!/\b200\b/.test(statusText)) continue;
+      const prop = findChild(propstat, "prop");
+      if (!prop) continue;
+      const etag = elementText(findChild(prop, "getetag")).replace(/^"|"$/g, "");
+      const data = elementText(findChild(prop, "calendar-data"));
+      if (!data) continue;
+      const fullUrl = new URL(href, collectionUrl).href;
+      results.push({ url: fullUrl, etag, data } as DAVCalendarObject);
+    }
+  }
+
+  return results;
+}
+
+function toIcalUtcStamp(ms: number): string {
+  // CalDAV time-range expects "20260101T000000Z" — date-time, no separators.
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return (
+    d.getUTCFullYear().toString() +
+    pad(d.getUTCMonth() + 1) +
+    pad(d.getUTCDate()) +
+    "T" +
+    pad(d.getUTCHours()) +
+    pad(d.getUTCMinutes()) +
+    pad(d.getUTCSeconds()) +
+    "Z"
+  );
+}
+
+function requireValidDate(value: string, field: string): Date {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) {
+    throw new Error(`Invalid date for ${field}: ${JSON.stringify(value)}`);
+  }
+  return d;
 }
 
 // ---------------------------------------------------------------------------
@@ -334,11 +510,11 @@ export function buildEventIcal(input: BuildEventInput): { uid: string; ics: stri
   );
   vevent.addPropertyWithValue(
     "dtstart",
-    ICAL.Time.fromJSDate(new Date(input.start), true)
+    ICAL.Time.fromJSDate(requireValidDate(input.start, "start"), true)
   );
   vevent.addPropertyWithValue(
     "dtend",
-    ICAL.Time.fromJSDate(new Date(input.end), true)
+    ICAL.Time.fromJSDate(requireValidDate(input.end, "end"), true)
   );
   if (input.description) vevent.addPropertyWithValue("description", input.description);
   if (input.location) vevent.addPropertyWithValue("location", input.location);
@@ -374,7 +550,10 @@ export function buildTaskIcal(input: BuildTaskInput): { uid: string; ics: string
     ICAL.Time.fromJSDate(new Date(), true)
   );
   if (input.due) {
-    vtodo.addPropertyWithValue("due", ICAL.Time.fromJSDate(new Date(input.due), true));
+    vtodo.addPropertyWithValue(
+      "due",
+      ICAL.Time.fromJSDate(requireValidDate(input.due, "due"), true)
+    );
   }
   if (input.description) vtodo.addPropertyWithValue("description", input.description);
   vtodo.addPropertyWithValue("status", "NEEDS-ACTION");

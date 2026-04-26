@@ -1796,6 +1796,284 @@ Build + test plan before shipping Phase 14:
     confirm preview card, confirm commit, verify it shows on phone
     calendar within the device's refresh interval.
 
+
+═══════════════════════════════════════════════════════════════════════
+Phase 15 — Calendar sync hardening + iCal validation ✅ COMPLETE
+═══════════════════════════════════════════════════════════════════════
+
+Goal: make the LLM calendar tool loop from Phase 14 actually round-trip
+through Stalwart. Phase 14 wrote tasks via CalDAV PUT successfully but
+the read-back via syncCalendar was completely broken, so the local mirror
+stayed empty and listEvents returned nothing. The model also produced
+malformed dates which Stalwart accepted, leaving permanent garbage iCal
+in the collection that no client could parse.
+
+Step 55. Diagnose the "Collection query failed: 404" error ✅
+
+Symptom: every createTask / createEvent succeeded user-visibly, but the
+server log filled with `Collection query failed: 404 Not Found. Raw
+response: [object Object]` and the events table never gained rows.
+
+Root cause (found by curl-ing Stalwart's REPORT endpoint directly):
+Stalwart returns HTTP 207 multi-status for calendar-query REPORTs, but
+when the comp-filter matches zero resources it embeds a single
+<D:response> with <D:status>HTTP/1.1 404 Not Found</D:status> on the
+collection URL itself, with description "No resources found". Per RFC
+4791 §7.8 it should return an empty <D:multistatus> (no <response>
+children); Stalwart's reply is non-compliant in a way tsdav can't
+tolerate — tsdav's collectionQuery does
+`queryResults.find(res => res.status >= 400)` and throws on the first
+hit.
+
+Compounding bug: tsdav's fetchCalendarObjects with a timeRange filter
+only requests VEVENTs. The user's Stalwart collection contained only
+VTODOs, so even if the 404 hadn't blown up, every task would silently
+go missing from the local mirror.
+
+Step 56. Replace fetchCalendarObjects with a hand-rolled REPORT ✅
+
+lib/calendar.ts gains:
+
+  - reportCalendarObjects(cfg, collectionUrl, comp, range?) — issues
+    REPORT calendar-query directly via fetch, parses the multistatus
+    with xml-js, treats the "single response on collection URL with
+    status 404" pattern as empty, and returns a list of
+    {url, etag, data} for every 200 propstat.
+  - buildCalendarQueryBody(comp, range?) — builds the calendar-query
+    XML for a single component type, with optional time-range.
+  - toIcalUtcStamp(ms) — formats a JS timestamp as the
+    "YYYYMMDDThhmmssZ" form CalDAV time-range expects.
+
+syncCalendar now iterates each calendar's supported components (per
+the supported-calendar-component-set discovered by fetchCalendars) and
+issues TWO REPORTs per calendar — VEVENT with time-range, VTODO
+without — so both kinds reach the events table. Each call is wrapped
+in try/catch so one bad comp-filter doesn't kill the loop.
+
+Step 57. Reject invalid dates at the boundary ✅
+
+Two layers of defence so we never write `DUE:NaN-aNNaNTNN:aN` again:
+
+  1. lib/calendarTools.ts: createEventSchema, moveEventSchema, and
+     createTaskSchema's date fields go through a new isoDateTime zod
+     refinement that rejects anything new Date() can't parse. A
+     bad LLM proposal now 400s at /api/calendar/tools/execute before
+     any iCal is built.
+  2. lib/calendar.ts: requireValidDate(value, field) guard inside
+     buildEventIcal and buildTaskIcal throws if a date slips through
+     the schema layer (e.g. via a non-route caller). Belt + braces.
+
+Also added "Current date/time: <ISO>" anchor to the calendar tool
+system prompt (toolSystemPrompt() in lib/calendarTools.ts is now a
+function, not a constant). Without this anchor the local model
+(gemma3) was emitting `due: "tomorrow"` literals or guessing wrong
+years (e.g. 2024 in 2026).
+
+Step 58. Defensive iCal parser ✅
+
+ical.js eagerly hydrates date properties on read and throws from
+inside getFirstPropertyValue when the underlying value is malformed.
+parseIcalObject now uses safeMs() and safeString() helpers that
+catch hydration throws per-property and return null rather than
+killing the whole component. Combined with Step 56's per-comp-filter
+try/catch, a single bad VTODO can no longer poison sync.
+
+Step 59. Cleanup pass ✅
+
+Two pre-existing malformed VTODOs (DUE:NaN-aNNaNTNN:aN, written by
+the LLM before the date guards landed) were DELETE'd from Stalwart
+directly via authenticated curl. The defensive parser added in Step
+58 means future garbage doesn't need a manual cleanup — sync just
+skips it and logs.
+
+Deliverable:
+
+createTask / createEvent now write to Stalwart, syncCalendar reads
+back from Stalwart, the events table mirrors both VEVENTs and VTODOs,
+and listEvents returns them. Tasks created in chat are visible to any
+CalDAV client pointed at the same collection. Phase 16 picks up from
+here to make a third-party client (iPhone Calendar / Reminders) one
+of those clients.
+
+
+═══════════════════════════════════════════════════════════════════════
+Phase 16 — Stalwart over Tailscale Funnel + iPhone integration (PLANNED)
+═══════════════════════════════════════════════════════════════════════
+
+Goal: expose Stalwart's CalDAV endpoint over the existing Tailscale
+Funnel from Phase 11 so an iPhone (or any RFC-compliant CalDAV/CardDAV
+client) can connect with a real HTTPS cert, no LAN-only restriction,
+no manual cert install. Use the iCal alarm component to drive
+notifications at task/event time — no APNs, no Web Push for this path,
+just standard VALARM that the iOS Calendar/Reminders apps render
+locally.
+
+Why this phase exists:
+
+Phase 14 set the "any standard CalDAV client can see the events"
+expectation, but never wired the network path. Stalwart binds to
+[::1]:8080 by default, so it's only reachable from the host. Even on
+the LAN, modern iOS effectively refuses non-HTTPS CalDAV accounts
+silently. The Phase 11 Funnel already terminates HTTPS for Eidetic on
+the same hostname; we extend it to multiplex Stalwart on a path
+prefix.
+
+Key design decisions:
+
+  1. Path-based multiplexing on the existing Funnel hostname, not a
+     second hostname. `tailscale serve` supports per-path proxies on
+     a single HTTPS endpoint. Eidetic stays at /, Stalwart's CalDAV
+     mounts at /dav (matching the local URL shape). One cert, one
+     hostname, one Funnel registration.
+  2. Stalwart keeps binding to localhost — Tailscale terminates TLS
+     and reverse-proxies to http://127.0.0.1:8080/dav. No change to
+     Stalwart's listener config, no risk of accidentally exposing
+     the admin port (8080 also serves the management UI; we only
+     proxy the /dav path prefix).
+  3. iPhone integration uses Apple's two-app split: the Calendar
+     app shows VEVENTs only, the Reminders app shows VTODOs only.
+     Both speak CalDAV against the same account. For Eidetic's
+     "remind me to take out the trash" use case, Reminders is the
+     right surface; for "schedule dentist Thursday 10am", Calendar
+     is. Both work from the same Settings → Account.
+  4. Notifications come from VALARM components inside the iCal
+     payload, not a server push. iOS fires local notifications when
+     the trigger time hits — fully offline-capable, no APNs token
+     plumbing, no Eidetic-side notification service required for
+     this path. (Phase 14's planned Web Push remains the path for
+     in-app/desktop notifications.)
+
+Step 60. Multiplex Stalwart onto the existing Funnel
+
+Add a `tailscale serve` config block that mounts /dav on the same
+HTTPS endpoint Eidetic already uses:
+
+  tailscale serve --bg --https=443 --set-path=/dav \
+    proxy http://127.0.0.1:8080/dav
+
+(Exact CLI syntax depends on installed Tailscale version — newer
+builds prefer `tailscale serve` config files at
+`%LOCALAPPDATA%\Tailscale\serve\<hostname>.json` over command-line
+flags. The installer in Step 63 should write the config file
+directly to be version-stable.)
+
+Validation:
+
+  curl -i https://<host>.<tailnet>.ts.net/dav/.well-known/caldav
+
+should return Stalwart's CalDAV well-known redirect, not Eidetic's
+Next.js 404.
+
+Risk to handle: the management UI on /admin must NOT be exposed.
+Confirm `tailscale serve status` only lists the /dav path, and
+manually try `https://<host>.<tailnet>.ts.net/admin` to verify it
+404s through the proxy.
+
+Step 61. Add iPhone CalDAV+Reminders setup to /settings/network
+
+Extend app/settings/network/page.tsx (the page from Phase 9 that
+already shows the Tailscale URL and QR code) with an "iPhone
+calendar setup" panel that displays:
+
+  - Server hostname: <host>.<tailnet>.ts.net (no scheme, no path —
+    iOS's "Add CalDAV Account" form only takes the hostname)
+  - Username: STALWART_USERNAME from env
+  - Password reveal button (server reads from env, never embeds
+    in the rendered HTML)
+  - The two account paths (Settings → Calendar → Add CalDAV vs
+    Settings → Reminders → Add Account) and which one shows what
+  - A note explaining the VEVENT/VTODO split
+
+This is a docs panel, not a deeplink — iOS doesn't accept a profile
+URL for CalDAV without an MDM signing cert, so we can't one-tap it.
+Best we can do is reduce the typing to "copy hostname, paste,
+copy password, paste".
+
+Step 62. Emit VALARM components from buildEventIcal / buildTaskIcal
+
+Both builders in lib/calendar.ts gain an optional alarmMinutesBefore
+parameter (default: 0 for tasks — fire at the due time; 15 for events
+— fire 15 min before start). Each builder appends a VALARM
+subcomponent to the VEVENT/VTODO:
+
+  BEGIN:VALARM
+  ACTION:DISPLAY
+  DESCRIPTION:<summary>
+  TRIGGER:-PT<n>M       (or PT0M / -PT0S for "exactly at")
+  END:VALARM
+
+createEventExecutor and createTaskExecutor in calendarTools.ts
+plumb a default through; the LLM tool schema does NOT expose the
+alarm field (we always add one — having to teach the model about
+alarms adds latency for no user benefit).
+
+Round-trip test: create a task via chat with due time +2 minutes,
+sync to iPhone, confirm the Reminders banner appears on the lock
+screen at the due time.
+
+Step 63. Installer integration
+
+Extend install.ps1 (after the Stalwart block from Phase 14's Step 54
+and after the Tailscale Funnel block from Phase 12's Step 39) with a
+small "Wire Stalwart through Funnel?" prompt:
+
+  1. Detect: is Stalwart configured (STALWART_CALDAV_URL set) AND
+     is Tailscale Funnel active (`tailscale funnel status` returns
+     a registered URL)? Skip if either is false.
+  2. Prompt: "Expose Stalwart CalDAV at /dav on your Funnel URL so
+     iPhone can connect? [Y/n]"
+  3. On yes: write the `tailscale serve` config file (path-based,
+     /dav → 127.0.0.1:8080/dav), restart the Tailscale service so
+     it picks up the new config, validate by curl-ing the .well-
+     known endpoint over the public URL.
+  4. On failure: same try/catch/Pause-Before-Exit treatment as the
+     other installer blocks. Common fails to message:
+       - Tailscale service requires admin → re-run as admin
+       - Funnel attribute not enabled on the tailnet → link to the
+         admin console instructions from Phase 11
+       - Stalwart admin UI accidentally proxied → bail with a
+         clear instruction to remove `/` mappings from serve.json
+
+launch.ps1 verification step gains a matching check: if the serve
+config mentions /dav, curl the public URL's /dav/.well-known/caldav
+and print "CalDAV reachable from internet" in green.
+
+Open questions / later-phase work:
+
+  - VALARM defaults: single 0-minute trigger for tasks is correct,
+    but events probably want a per-event prompt ("notify me 1 hour
+    before"). Add a UI affordance later — for now, hard-code
+    sensible defaults.
+  - CardDAV exposure: same Funnel pattern would make Stalwart's
+    contacts reachable to iPhone. Defer until contact ingestion
+    actually has data flowing.
+  - Account-discovery deeplink: investigate Apple's MDM-free
+    "configuration profile" flow — even an unsigned .mobileconfig
+    pre-fills the account form on tap. Worth a follow-up if
+    typing-on-iPhone proves to be the friction point.
+  - Multi-user safety: Funnel is public-internet. Stalwart's
+    account is password-protected, but the password is the same
+    one stored in plaintext in .env.local. Consider rotating to
+    a Funnel-only password distinct from the local-bind password
+    if Eidetic ever becomes multi-user.
+
+Build + test plan before marking Phase 16 complete:
+
+  - Manual: add CalDAV account on iPhone using the panel from
+    Step 61. Confirm sync within 15 min default interval.
+  - Manual: create a task via Eidetic chat with due time +2 min,
+    confirm a Reminders notification fires on the iPhone.
+  - Manual: create an event via Eidetic chat for tomorrow 09:00,
+    confirm it shows in iPhone Calendar and a notification fires
+    15 min before.
+  - Manual: edit a task on the iPhone (rename, complete), confirm
+    Eidetic's syncCalendar picks up the change on next run and
+    the events table reflects it.
+  - Negative: hit https://<host>.<tailnet>.ts.net/admin from a
+    public-internet device, confirm 404 (Stalwart admin UI must
+    not be reachable through Funnel).
+
+
 Recommended tools by layer
 App layer
 Next.js
