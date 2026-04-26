@@ -3,10 +3,10 @@ import db from "@/lib/db";
 import { routeQuery } from "@/lib/queryRouter";
 import {
   READ_ONLY_TOOLS,
-  TOOL_SYSTEM_PROMPT,
   WRITE_TOOLS,
   executeTool,
   signProposal,
+  toolSystemPrompt,
   validateArgs,
   type ToolName,
 } from "@/lib/calendarTools";
@@ -27,7 +27,7 @@ async function askModelForTool(userContent: string): Promise<ToolCall | null> {
       body: JSON.stringify({
         model: OLLAMA_MODEL,
         messages: [
-          { role: "system", content: TOOL_SYSTEM_PROMPT },
+          { role: "system", content: toolSystemPrompt() },
           { role: "user", content: userContent },
         ],
         stream: false,
