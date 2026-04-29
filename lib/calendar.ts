@@ -492,6 +492,31 @@ export interface BuildEventInput {
   description?: string;
   location?: string;
   attendees?: string[];
+  // Minutes before start for the VALARM trigger. Default 15. Pass 0 for "at
+  // start time", or null/false to suppress the alarm entirely.
+  alarmMinutesBefore?: number | null;
+}
+
+// Append a DISPLAY VALARM with a duration trigger. Negative offsetMinutes means
+// "before start/due"; 0 means "exactly at"; positive would be "after".
+function appendDisplayAlarm(
+  parent: ICAL.Component,
+  description: string,
+  offsetMinutes: number
+) {
+  const valarm = new ICAL.Component("valarm");
+  valarm.addPropertyWithValue("action", "DISPLAY");
+  valarm.addPropertyWithValue("description", description || "Reminder");
+
+  const trigger = new ICAL.Property("trigger");
+  // ICAL.Duration.fromString understands "-PT15M", "PT0S", etc.
+  const sign = offsetMinutes < 0 ? "-" : "";
+  const magnitude = Math.abs(offsetMinutes);
+  const dur = magnitude === 0 ? "PT0S" : `${sign}PT${magnitude}M`;
+  trigger.setValue(ICAL.Duration.fromString(dur));
+  valarm.addProperty(trigger);
+
+  parent.addSubcomponent(valarm);
 }
 
 export function buildEventIcal(input: BuildEventInput): { uid: string; ics: string } {
@@ -524,6 +549,13 @@ export function buildEventIcal(input: BuildEventInput): { uid: string; ics: stri
     vevent.addProperty(prop);
   }
 
+  // VALARM lives inside the VEVENT. iOS Calendar fires a local notification
+  // when the trigger time hits — no APNs/server push needed for this path.
+  const alarmMinutes = input.alarmMinutesBefore ?? 15;
+  if (alarmMinutes !== null && alarmMinutes !== undefined) {
+    appendDisplayAlarm(vevent, input.summary, -Math.abs(alarmMinutes));
+  }
+
   vcalendar.addSubcomponent(vevent);
   return { uid, ics: vcalendar.toString() };
 }
@@ -533,6 +565,10 @@ export interface BuildTaskInput {
   summary: string;
   due?: string;
   description?: string;
+  // Minutes before due for the VALARM trigger. Default 0 (fire at due time).
+  // null/false suppresses the alarm. Ignored when no `due` is set, since iOS
+  // can't render a triggerless reminder alarm meaningfully.
+  alarmMinutesBefore?: number | null;
 }
 
 export function buildTaskIcal(input: BuildTaskInput): { uid: string; ics: string } {
@@ -557,6 +593,13 @@ export function buildTaskIcal(input: BuildTaskInput): { uid: string; ics: string
   }
   if (input.description) vtodo.addPropertyWithValue("description", input.description);
   vtodo.addPropertyWithValue("status", "NEEDS-ACTION");
+
+  // For tasks, iOS Reminders only fires the VALARM when the VTODO has a DUE.
+  // Skip the alarm for "someday" tasks rather than emitting a triggerless one.
+  const alarmMinutes = input.alarmMinutesBefore ?? 0;
+  if (input.due && alarmMinutes !== null && alarmMinutes !== undefined) {
+    appendDisplayAlarm(vtodo, input.summary, -Math.abs(alarmMinutes));
+  }
 
   vcalendar.addSubcomponent(vtodo);
   return { uid, ics: vcalendar.toString() };

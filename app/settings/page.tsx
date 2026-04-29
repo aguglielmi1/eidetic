@@ -9,9 +9,19 @@ interface NetworkInfo {
   urls: string[];
 }
 
+interface StalwartInfo {
+  configured: boolean;
+  funnelHostname: string | null;
+  username: string | null;
+  password: string | null;
+  davPath: string;
+}
+
 export default function SettingsPage() {
   const [network, setNetwork] = useState<NetworkInfo | null>(null);
   const [funnelUrl, setFunnelUrl] = useState<string>("");
+  const [stalwart, setStalwart] = useState<StalwartInfo | null>(null);
+  const [showPassword, setShowPassword] = useState(false);
 
   useEffect(() => {
     fetch("/api/network-info")
@@ -20,6 +30,10 @@ export default function SettingsPage() {
         setNetwork(data);
         if (data.funnelUrl) setFunnelUrl(data.funnelUrl);
       })
+      .catch(() => {});
+    fetch("/api/calendar/stalwart-info")
+      .then((r) => r.json())
+      .then((data) => setStalwart(data))
       .catch(() => {});
   }, []);
 
@@ -183,6 +197,101 @@ export default function SettingsPage() {
             </>
           )}
         </div>
+
+        {/* iPhone Calendar + Reminders */}
+        {stalwart?.configured && (
+          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-5">
+            <h2 className="text-sm font-medium text-zinc-300 mb-3">
+              iPhone Calendar &amp; Reminders
+            </h2>
+
+            {!stalwart.funnelHostname ? (
+              <p className="text-sm text-zinc-500">
+                Funnel isn&apos;t configured yet. Enable Tailscale Funnel above so iPhone can
+                reach Stalwart over HTTPS, then re-run the installer to mount /dav.
+              </p>
+            ) : (
+              <>
+                <p className="text-xs text-zinc-500 mb-3">
+                  Add your eidetic calendar and reminders to iPhone via CalDAV. iOS splits
+                  this into two apps that share the same account: Calendar shows events,
+                  Reminders shows tasks.
+                </p>
+
+                <div className="space-y-2 mb-4">
+                  <div className="flex items-center justify-between rounded-lg bg-zinc-800 px-3 py-2">
+                    <span className="text-xs text-zinc-500">Server</span>
+                    <div className="flex items-center gap-2">
+                      <code className="text-sm text-blue-400">{stalwart.funnelHostname}</code>
+                      <button
+                        onClick={() => navigator.clipboard.writeText(stalwart.funnelHostname ?? "")}
+                        className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+                      >
+                        Copy
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between rounded-lg bg-zinc-800 px-3 py-2">
+                    <span className="text-xs text-zinc-500">Username</span>
+                    <div className="flex items-center gap-2">
+                      <code className="text-sm text-zinc-200">{stalwart.username}</code>
+                      <button
+                        onClick={() => navigator.clipboard.writeText(stalwart.username ?? "")}
+                        className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+                      >
+                        Copy
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between rounded-lg bg-zinc-800 px-3 py-2">
+                    <span className="text-xs text-zinc-500">Password</span>
+                    <div className="flex items-center gap-2">
+                      <code className="text-sm text-zinc-200">
+                        {showPassword ? stalwart.password : "••••••••"}
+                      </code>
+                      <button
+                        onClick={() => setShowPassword((v) => !v)}
+                        className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+                      >
+                        {showPassword ? "Hide" : "Show"}
+                      </button>
+                      <button
+                        onClick={() => navigator.clipboard.writeText(stalwart.password ?? "")}
+                        className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+                      >
+                        Copy
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-3 text-xs text-zinc-400">
+                  <div>
+                    <p className="text-zinc-300 font-medium mb-1">Calendar app (events)</p>
+                    <p className="text-zinc-500">
+                      Settings → Calendar → Accounts → Add Account → Other → Add CalDAV
+                      Account. Paste the server, username, and password above.
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-zinc-300 font-medium mb-1">Reminders app (tasks)</p>
+                    <p className="text-zinc-500">
+                      Settings → Reminders → Accounts → Add Account → Other → Add CalDAV
+                      Account. Same server/username/password — iOS shows VTODO entries here
+                      and VEVENTs in Calendar automatically.
+                    </p>
+                  </div>
+                  <p className="text-zinc-600 pt-1">
+                    Notifications come from VALARM components inside each event/task and
+                    fire on the device — no APNs setup or open Eidetic session required.
+                  </p>
+                </div>
+              </>
+            )}
+          </div>
+        )}
 
         {/* Notifications */}
         <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-5">

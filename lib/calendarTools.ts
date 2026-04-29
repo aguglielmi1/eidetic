@@ -24,15 +24,21 @@ export const listEventsSchema = z.object({
   to: z.string().optional(),
 });
 
-// ISO-8601 datetime guard. Accepts both with and without milliseconds, with
-// either Z or +HH:MM offsets. Use this for every user/LLM-supplied date so we
-// never pipe `new Date("tomorrow")` into ical.js (which silently writes a
-// `DUE:NaN-aNNaNTNN:aN` property that Stalwart accepts but no client can read).
+// ISO-8601 datetime guard. Requires an explicit timezone designator
+// (Z or +HH:MM / -HH:MM). A naive datetime like "2026-04-29T02:37:11" is
+// ambiguous - different clients render it in different timezones, leading
+// to events that show up at completely wrong wall-clock times on the user's
+// devices. Reject it here and force the LLM to include the offset.
 const isoDateTime = z
   .string()
-  .refine((v) => !Number.isNaN(new Date(v).getTime()), {
-    message: "must be a valid ISO-8601 datetime",
-  });
+  .refine(
+    (v) => {
+      if (Number.isNaN(new Date(v).getTime())) return false;
+      // Must end in Z or have a +HH:MM / -HH:MM offset on the time component.
+      return /T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(v);
+    },
+    { message: "must be ISO-8601 with explicit timezone (e.g. ...-04:00 or ...Z)" }
+  );
 
 export const createEventSchema = z.object({
   summary: z.string().min(1),
@@ -392,23 +398,52 @@ function toIcalUtc(d: Date): string {
 // ---------------------------------------------------------------------------
 
 export function toolSystemPrompt(now: Date = new Date()): string {
+  // Tell the LLM the current time in the SERVER's local timezone with an
+  // explicit offset, not UTC. Otherwise the model sees `...Z`, computes
+  // "+1 hour" against UTC, and emits the result as a local-offset ISO -
+  // which is correct math but lands the event hours off because the model
+  // never actually knew what the user's local clock reads.
+  const tzOffsetMin = -now.getTimezoneOffset();
+  const sign = tzOffsetMin >= 0 ? "+" : "-";
+  const absMin = Math.abs(tzOffsetMin);
+  const offsetStr =
+    `${sign}${String(Math.floor(absMin / 60)).padStart(2, "0")}:` +
+    `${String(absMin % 60).padStart(2, "0")}`;
+
+  // Build a local ISO like 2026-04-28T22:30:49.116-04:00 (no shift to UTC).
+  const pad = (n: number, w = 2) => String(n).padStart(w, "0");
+  const localIso =
+    `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}` +
+    `T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}` +
+    `.${pad(now.getMilliseconds(), 3)}${offsetStr}`;
+
+  // Concrete +1 hour example so a small local model (Gemma3) sees an
+  // actual ISO with the offset baked in.
+  const examplePlusOneHour = new Date(now.getTime() + 60 * 60 * 1000);
+  const exampleIso =
+    `${examplePlusOneHour.getFullYear()}-${pad(examplePlusOneHour.getMonth() + 1)}-${pad(examplePlusOneHour.getDate())}` +
+    `T${pad(examplePlusOneHour.getHours())}:${pad(examplePlusOneHour.getMinutes())}:${pad(examplePlusOneHour.getSeconds())}` +
+    `${offsetStr}`;
+
   return [
-    `Current date/time: ${now.toISOString()} (use this to resolve relative phrases like "in 10 minutes", "tomorrow", "next Tuesday").`,
-    "You are a calendar assistant. The user's message is a calendar request.",
-    "Decide which tool to call and reply ONLY with a JSON object matching:",
-    "  {\"tool\":\"<toolName>\",\"args\":{…}}",
-    "No prose, no markdown fences, no explanation.",
+    "You are a calendar assistant. Reply ONLY with a JSON object: {\"tool\":\"<name>\",\"args\":{…}}.",
+    "No prose, no markdown fences. If unrelated to calendar, return {\"tool\":\"none\",\"args\":{}}.",
     "",
-    "Available tools (JSON schemas):",
-    "  listEvents:   {\"range\":\"today|tomorrow|this_week|next_week|custom\",\"from\"?:\"ISO-8601\",\"to\"?:\"ISO-8601\"}",
-    "  createEvent:  {\"summary\":string,\"start\":\"ISO-8601\",\"end\":\"ISO-8601\",\"description\"?:string,\"location\"?:string,\"attendees\"?:string[]}",
-    "  moveEvent:    {\"uid\":string,\"newStart\":\"ISO-8601\",\"newEnd\":\"ISO-8601\"}",
-    "  cancelEvent:  {\"uid\":string}",
-    "  createTask:   {\"summary\":string,\"due\"?:\"ISO-8601\",\"description\"?:string}",
-    "  completeTask: {\"uid\":string}",
+    `Now: ${localIso} (this is the user's local wall clock).`,
+    `Always emit ISO-8601 datetimes ending in ${offsetStr}.`,
     "",
-    "Use the user's local timezone for ISO-8601 values. Default event duration: 60 minutes.",
-    "If the request isn't a calendar action, emit {\"tool\":\"none\",\"args\":{}}.",
+    "Tools:",
+    "  listEvents   {range:\"today|tomorrow|this_week|next_week|custom\", from?, to?}",
+    "  createEvent  {summary, start, end, description?, location?, attendees?}",
+    "  moveEvent    {uid, newStart, newEnd}",
+    "  cancelEvent  {uid}",
+    "  createTask   {summary, due?, description?}",
+    "  completeTask {uid}",
+    "",
+    "Default event duration: 60 minutes.",
+    "",
+    "Example for \"remind me to take my toothbrush in an hour\":",
+    `  {"tool":"createTask","args":{"summary":"Take toothbrush","due":"${exampleIso}"}}`,
   ].join("\n");
 }
 

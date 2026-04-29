@@ -252,6 +252,30 @@ if (-not $tsExe) {
         Write-Ok "Funnel active on port 3000"
         # Refresh cached URL for next time
         Set-Content -Path (Join-Path $PSScriptRoot "public-url.txt") -Value $publicUrl -Encoding UTF8
+
+        # Phase 16: if the serve config carries a /dav mapping, verify it's
+        # actually reachable. Helps catch a half-configured state where the
+        # mapping exists locally but Funnel propagation broke.
+        if ($funnelStatus -match "/dav" -and $stalwartConfigured) {
+            try {
+                $davResp = Invoke-WebRequest -Uri "$publicUrl/dav/.well-known/caldav" `
+                    -Method GET -UseBasicParsing -MaximumRedirection 0 `
+                    -TimeoutSec 15 -ErrorAction SilentlyContinue
+                if ($davResp -and ($davResp.StatusCode -in 200, 301, 302, 401)) {
+                    Write-Ok "CalDAV reachable from internet at $publicUrl/dav"
+                } else {
+                    Write-Warn "CalDAV /dav mapping exists but didn't respond as expected"
+                }
+            } catch {
+                $exResp = $null
+                try { $exResp = $_.Exception.Response } catch {}
+                if ($exResp -and ([int]$exResp.StatusCode -in 301, 302, 401)) {
+                    Write-Ok "CalDAV reachable from internet at $publicUrl/dav"
+                } else {
+                    Write-Warn "CalDAV /dav check failed - iPhone sync may not work"
+                }
+            }
+        }
     } else {
         $funnelState = "inactive"
         Write-Warn "Funnel is not active on port 3000"
